@@ -5,6 +5,7 @@ Talks to the firmware mailbox (/dev/vcio) directly because HA OS has no vcgencmd
 Prints one JSON object; the sensor's state is `watts`, everything else becomes attributes.
 - watts/rails: PMIC rail readings (`vcgencmd pmic_read_adc`). Sums the board's own rails, so it
   leaves out USB devices and PMIC conversion losses: a floor, not wall-plug draw. Pi 5 only.
+- model: board name from the device tree ("Raspberry Pi 5 Model B Rev 1.0").
 - throttled: `vcgencmd get_throttled` bits, decoded into now / since-boot flags.
 - arm_mhz: measured CPU clock.
 - wifi_dbm: signal from /proc/net/wireless (HA core uses the host network).
@@ -45,6 +46,10 @@ def power():
     volts = {m[1]: float(m[2]) for m in re.finditer(r"(\S+)_V volt\(\d+\)=([\d.]+)V", out)}
     rails = {k: round(amps[k] * volts[k], 3) for k in amps if k in volts}
     return {"watts": round(sum(rails.values()), 2), "rails": rails} if rails else {}
+
+
+def model():
+    return {"model": open("/proc/device-tree/model").read().strip("\0\n ")}
 
 
 def throttled():
@@ -103,7 +108,7 @@ try:
 except (OSError, ValueError):
     state = {}
 result = {}
-for part in (power, throttled, clock, wifi, lambda: disk(state, now), lambda: database(state, now)):
+for part in (model, power, throttled, clock, wifi, lambda: disk(state, now), lambda: database(state, now)):
     try:
         result.update(part())
     except Exception:  # noqa: BLE001 - a missing source just drops that field

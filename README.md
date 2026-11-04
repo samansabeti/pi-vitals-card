@@ -13,7 +13,7 @@ A Raspberry Pi health dashboard for Home Assistant, in a single card. It's built
 - **Backups, updates and apps.** Only pending updates are listed, plus each app's CPU and RAM.
 - **More details** (collapsed): RAM and swap, load average, stall pressure, network counters, platform versions.
 
-Every number has an ⓘ tooltip in plain English. The layout adapts to the card's width, from phone to widescreen. Light and dark mode follow your theme. No dependencies, no build step, one file.
+Every number has an ⓘ tooltip in plain English. Sensors are found by what they are, not by entity ID, so it works on installs in any language. If System Monitor is missing or some of its sensors are off, the card says which ones and links to the page where you turn them on. The layout adapts to the card's width, from phone to widescreen. Light and dark mode follow your theme. No dependencies, no build step, one file.
 
 ## Install
 
@@ -31,7 +31,7 @@ type: custom:pi-vitals-card
 
 | Data | Source | Required? |
 |---|---|---|
-| CPU, memory, disk, temperature, load, network, swap, stall pressure, uptime, IP | **System Monitor** integration (Settings → Devices & services → Add → System Monitor). Enable the sensors you want: they're disabled by default. | Yes (the card hides anything missing) |
+| CPU, memory, disk, temperature, load, network, swap, stall pressure, uptime, IP | **System Monitor** integration (Settings → Devices & services → Add → System Monitor). Enable the sensors you want: they're disabled by default. | Yes. The card hides anything missing and tells you which sensors to turn on |
 | Under-voltage | **Raspberry Pi Power Supply Checker** integration | Optional |
 | Backups, updates, apps | Built into Home Assistant OS (Backup, Supervisor and update entities) | Optional |
 | Board power, throttle flags, CPU clock, Wi-Fi signal, SD writes, database growth | `extras/pi_vitals.py` (below) | Optional |
@@ -50,7 +50,7 @@ command_line:
       unique_id: pi_board_power
       command: "python3 /config/pi_power/pi_vitals.py"
       value_template: "{{ value_json.watts }}"
-      json_attributes: [rails, throttled, arm_mhz, wifi_dbm, wifi_iface, disk_device, disk_written_gb, disk_write_kbs, db_mb, db_mb_per_day]
+      json_attributes: [rails, model, throttled, arm_mhz, wifi_dbm, wifi_iface, disk_device, disk_written_gb, disk_write_kbs, db_mb, db_mb_per_day]
       unit_of_measurement: W
       device_class: power
       state_class: measurement
@@ -65,11 +65,11 @@ All optional.
 
 | Option | Default | |
 |---|---|---|
-| `title` | auto ("Raspberry Pi 5", "Raspberry Pi 4", "Raspberry Pi") | Model label |
-| `prefix` | `sensor.system_monitor_` | System Monitor entity prefix |
+| `title` | auto (board model from the vitals sensor, else "Raspberry Pi"; "Home Assistant host" off a Pi, where the board drawing is hidden) | Model label |
+| `prefix` | — | Only if sensors are found wrongly: forces the old lookup by English entity IDs with this prefix (e.g. `sensor.system_monitor_`) |
 | `interface` | auto (`wlan0`, `eth0`, `end0`) | Network interface to show |
-| `vitals_entity` | `sensor.pi_board_power` | The pi_vitals sensor |
-| `power_status_entity` | `binary_sensor.raspberry_pi_power_status` | Under-voltage sensor |
+| `vitals_entity` | `sensor.pi_board_power`, else auto-detected | The pi_vitals sensor |
+| `power_status_entity` | auto (Raspberry Pi Power Supply Checker) | Under-voltage sensor |
 | `cores` | `4` | Used for load % |
 | `fan_max_rpm` | `8000` | Fan % scale (Pi 5 Active Cooler) |
 | `power_max_w` | `10` | Power gauge scale |
@@ -88,6 +88,10 @@ pv-accent: "#14B8A6"
 ```
 
 Status colors read `--sh-ok`, `--sh-warn` and `--sh-bad` if your theme defines them, with green, amber and red fallbacks.
+
+## Tested
+
+On a Pi 5 (8 GB, HA OS, Wi-Fi, SD card) running Home Assistant 2026.10. The card was also rendered against simulated installs: German entity IDs, a Pi 4 on Ethernet with °C sensors and no vitals sensor, a non-Pi host with only two System Monitor sensors, and no System Monitor at all. Please open an issue with a screenshot if something looks off on your setup.
 
 ## License
 

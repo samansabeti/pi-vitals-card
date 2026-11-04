@@ -3,12 +3,23 @@
 // storage wear, power and throttling, backups and updates, apps, and a collapsed "more details" drawer.
 // Reads System Monitor sensors plus the optional pi_vitals.py command_line sensor (power, throttle flags, clock,
 // Wi-Fi signal, SD writes, database growth). Everything optional hides cleanly when its sensor is missing.
+// Sensors are found by integration + translation key, so non-English installs work; `prefix` forces the old English-ID lookup.
 // Colors read Sabeti Home tokens (--sh-*) when present; --pv-accent overrides the data hue. No dependencies.
 const PV_VERSION = "1.0.0";
 const PV_DEFAULTS = {
-  prefix: "sensor.system_monitor_", vitals_entity: "sensor.pi_board_power", power_status_entity: "binary_sensor.raspberry_pi_power_status",
+  vitals_entity: "sensor.pi_board_power", power_status_entity: "binary_sensor.raspberry_pi_power_status",
   cores: 4, fan_max_rpm: 8000, power_max_w: 10, temp_warn_c: 65, temp_bad_c: 80, backup_stale_days: 3,
 };
+// English System Monitor entity suffixes (what the card was written against) → the integration's translation keys
+const PV_KEYS = {
+  processor_use: "processor_use", memory_usage: "memory_use_percent", disk_usage: "disk_use_percent", processor_temperature: "processor_temperature",
+  memory_use: "memory_use", memory_free: "memory_free", disk_use: "disk_use", disk_free: "disk_free", swap_usage: "swap_use_percent", swap_use: "swap_use",
+  pwmfan_fan_speed: "fan_speed", fan_speed: "fan_speed", load_1_min: "load_1m", load_5_min: "load_5m", load_15_min: "load_15m", uptime: "last_boot", last_boot: "last_boot",
+  network_throughput_in: "throughput_network_in", network_throughput_out: "throughput_network_out",
+};
+// sensors the card needs to be useful, with the names System Monitor shows for them
+const PV_NEEDED = [["processor_use", "Processor use"], ["memory_use_percent", "Memory usage"], ["disk_use_percent", "Disk usage"],
+  ["processor_temperature", "Processor temperature"], ["load_1m", "Load (1 min)"], ["throughput_network_in", "Network throughput in"], ["last_boot", "Last boot"]];
 const PV_TIPS = {
   status: "Overall verdict. Orange when the Pi runs warm or busy, dipped on power or throttled earlier since boot, or backups are overdue. Red when it's throttling right now, short on power or low on space.",
   cpu: "How busy the processor cores are, averaged. Home Assistant normally idles at 1–5%. Short spikes are normal; sustained 80%+ means something is working hard.",
@@ -49,7 +60,9 @@ class PiVitalsCard extends HTMLElement {
   constructor() { super(); this.attachShadow({ mode: "open" }); this.buf = {}; this.seen = {}; this.sig = ""; this.boardSig = ""; this.built = false; }
   setConfig(c) {
     this.config = { ...PV_DEFAULTS, ...(c || {}) };
-    this.P = this.config.prefix;
+    this.legacy = !!this.config.prefix;
+    this.P = this.config.prefix || "sensor.system_monitor_";
+    this.R = null;
   }
   getCardSize() { return 12; }
   getGridOptions() { return { columns: "full", rows: "auto" }; }
@@ -82,30 +95,76 @@ class PiVitalsCard extends HTMLElement {
   }
   v(id) { const s = this._hass.states[id]; return s && !["unknown", "unavailable"].includes(s.state) ? s.state : null; }
   n(id) { const x = parseFloat(this.v(id)); return Number.isFinite(x) ? x : null; }
+  // Index the entity registry once per change: System Monitor by translation key, Supervisor devices (Core, Supervisor, OS, host, apps),
+  // backups, the Pi power checker and the pi_vitals sensor. Entity IDs follow the install's language, these don't.
+  index(h) {
+    if (this.R && h.entities === this._E) return;
+    this._E = h.entities;
+    const E = Object.values(h.entities || {}), R = { sm: {}, apps: [], sys: {}, backup: {}, devs: {} };
+    for (const e of E) {
+      if (e.platform === "systemmonitor") {
+        const k = e.translation_key || (/^(timestamp|uptime)$/.test(h.states[e.entity_id]?.attributes?.device_class || "") ? "last_boot" : null);
+        if (k) (R.sm[k] ||= []).push(e.entity_id);
+      } else if (e.platform === "backup" && e.translation_key) R.backup[e.translation_key] = e.entity_id;
+      else if (e.platform === "rpi_power") R.rpiPower = e.entity_id;
+      else if (e.platform === "hassio" && e.device_id) (R.devs[e.device_id] ||= {})[e.entity_id.startsWith("binary_sensor.") ? "running" : e.translation_key] = e.entity_id;
+    }
+    for (const k in R.sm) R.sm[k].sort((a, b) => a.length - b.length || a.localeCompare(b));
+    for (const e of E) if (e.entity_id.startsWith("update.") && R.devs[e.device_id]) R.devs[e.device_id].update = e.entity_id;
+    for (const [id, d] of Object.entries(R.devs)) {
+      const dev = h.devices?.[id], name = dev?.name_by_user || dev?.name || "";
+      if (d.running) R.apps.push({ ...d, name: name || "App" });
+      else if (/core/i.test(name) && d.cpu_percent) R.sys.core = d;
+      else if (/supervisor/i.test(name) && d.cpu_percent) R.sys.supervisor = d;
+      else if (/operating system/i.test(name)) R.sys.os = d;
+      else if (d.disk_total) R.sys.host = d;
+    }
+    R.apps.sort((a, b) => a.name.localeCompare(b.name));
+    R.vitals = h.states[this.config.vitals_entity] ? this.config.vitals_entity
+      : Object.keys(h.states).find(k => k.startsWith("sensor.") && h.states[k].attributes?.rails && "throttled" in h.states[k].attributes) || this.config.vitals_entity;
+    R.power = h.states[this.config.power_status_entity] ? this.config.power_status_entity : R.rpiPower;
+    R.hasSM = !this.legacy && Object.keys(R.sm).length > 0;
+    R.noRegistry = !h.entities;
+    R.watch = new Set([...Object.values(R.sm).flat(), ...Object.values(R.backup), R.power, R.vitals,
+      ...Object.values(R.devs).flatMap(d => Object.values(d))].filter(Boolean));
+    this.R = R;
+  }
+  // System Monitor entity for an English suffix ("processor_use", "network_in_wlan0", "cpu_pressure_some_10s_average")
+  S(suffix) {
+    if (!this.R?.hasSM) return this.P + suffix;
+    const sm = this.R.sm;
+    let m = suffix.match(/^(network_throughput_in|network_throughput_out|network_in|network_out|packets_in|packets_out|ipv4_address)_(.+)$/);
+    if (m) { const tail = "_" + m[2].toLowerCase().replace(/\W/g, "_"); return (sm[PV_KEYS[m[1]] || m[1]] || []).find(id => id.endsWith(tail)); }
+    m = suffix.match(/^(cpu|memory|io)_pressure_(some|full)_(\d+)s_average$/);
+    if (m) return sm[`${m[1]}_pressure_${m[2]}_avg${m[3]}`]?.[0];
+    return sm[PV_KEYS[suffix] || suffix]?.[0];
+  }
   // network interface: config, else the one pi_vitals reports, else first wlan/eth/end with a throughput sensor
   iface() {
     if (this.config.interface) return this.config.interface;
-    const va = this._hass.states[this.config.vitals_entity]?.attributes?.wifi_iface;
-    const all = Object.keys(this._hass.states).filter(k => k.startsWith(this.P + "network_throughput_in_")).map(k => k.slice((this.P + "network_throughput_in_").length));
+    const va = this._hass.states[this.R.vitals]?.attributes?.wifi_iface;
+    const all = this.R.hasSM ? (this.R.sm.throughput_network_in || []).map(id => id.split("_").pop())
+      : Object.keys(this._hass.states).filter(k => k.startsWith(this.P + "network_throughput_in_")).map(k => k.slice((this.P + "network_throughput_in_").length));
     if (va && all.includes(va)) return va;
     return ["wlan0", "eth0", "end0"].find(x => all.includes(x)) || all[0] || "wlan0";
   }
   sparkDefs() {
-    const P = this.P, ifc = this.iface(), wired = !/^wl/.test(ifc), tU = this._hass.states[P + "processor_temperature"]?.attributes?.unit_of_measurement || "°C";
-    const hasPower = this.n(this.config.vitals_entity) != null;
+    const ifc = this.iface(), wired = !/^wl/.test(ifc), tU = this._hass.states[this.S("processor_temperature")]?.attributes?.unit_of_measurement || "°C";
+    const hasPower = this.n(this.R.vitals) != null;
     return [
-      ["cpu", P + "processor_use", "CPU", "%"],
-      ["temp", P + "processor_temperature", "Temperature", tU],
-      hasPower ? ["power", this.config.vitals_entity, "Board power", "W"] : ["mem", P + "memory_usage", "Memory", "%"],
-      ["load", P + "load_1_min", "Load · 1 min", ""],
-      ["down", P + `network_throughput_in_${ifc}`, wired ? "Network down" : "Wi-Fi down", "MB/s"],
-      ["up", P + `network_throughput_out_${ifc}`, wired ? "Network up" : "Wi-Fi up", "MB/s"],
-    ];
+      ["cpu", this.S("processor_use"), "CPU", "%"],
+      ["temp", this.S("processor_temperature"), "Temperature", tU],
+      hasPower ? ["power", this.R.vitals, "Board power", "W"] : ["mem", this.S("memory_usage"), "Memory", "%"],
+      ["load", this.S("load_1_min"), "Load · 1 min", ""],
+      ["down", this.S(`network_throughput_in_${ifc}`), wired ? "Network down" : "Wi-Fi down", "MB/s"],
+      ["up", this.S(`network_throughput_out_${ifc}`), wired ? "Network up" : "Wi-Fi up", "MB/s"],
+    ].filter(d => d[1] && this._hass.states[d[1]]);
   }
   set hass(h) {
     this._hass = h;
     if (this.modal?.isConnected) this.modal.hass = h;
     if (!this.built) this.build();
+    this.index(h);
     const defs = this.sparkDefs(), key = defs.map(d => d[1]).join();
     if (key !== this.sparkKey) { this.sparkKey = key; this.seed(defs); }
     const now = Date.now();
@@ -117,8 +176,7 @@ class PiVitalsCard extends HTMLElement {
       }
       if (this.buf[id]) this.buf[id] = this.buf[id].filter((p, i, a) => p[0] >= now - PV_WINDOW || (a[i + 1] && a[i + 1][0] >= now - PV_WINDOW));
     }
-    const ids = Object.keys(h.states).filter(k => k.startsWith(this.P) || k.startsWith("update.") || k.startsWith("sensor.backup_") || /_(cpu|memory)_percent$|_running$|_version$/.test(k)
-      || k === this.config.vitals_entity || k === this.config.power_status_entity);
+    const W = this.R.watch, ids = Object.keys(h.states).filter(k => k.startsWith("update.") || W.has(k) || (!this.R.hasSM && k.startsWith(this.P)));
     const sig = ids.map(k => h.states[k].last_updated).join() + ids.length;
     if (sig !== this.sig) { this.sig = sig; this.render(); }
   }
@@ -163,6 +221,11 @@ class PiVitalsCard extends HTMLElement {
       .board .led{filter:drop-shadow(0 0 2px currentColor)}
       @keyframes spin{to{transform:rotate(360deg)}}@keyframes blink{50%{opacity:.35}}
       @media (prefers-reduced-motion:reduce){.board .fan,.board .sd.on{animation:none}}
+      .hero.solo{grid-template-columns:1fr}
+      .setup{display:flex;gap:10px;align-items:flex-start;border:1px solid color-mix(in srgb, var(--sh-warn, #D97706) 35%, transparent);background:color-mix(in srgb, var(--sh-warn, #D97706) 7%, transparent);border-radius:6px;padding:10px 12px;font-size:13px;line-height:1.45}
+      .setup ha-icon{--mdc-icon-size:18px;color:var(--sh-warn, #D97706);flex:none;margin-top:1px}
+      .setup b{font-weight:600}
+      .setup a{color:var(--sh-accent, #2563EB);cursor:pointer;text-decoration:none;font-weight:500;white-space:nowrap}
       .verdict{container:verdict/inline-size;display:flex;flex-direction:column;gap:10px;min-width:0}
       .vhead{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap}
       .model{font-family:var(--pv-mono);font-size:11px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;color:var(--pv-accent, var(--sh-infra, #2563EB))}
@@ -254,6 +317,7 @@ class PiVitalsCard extends HTMLElement {
     };
     this.shadowRoot.addEventListener("click", e => {
       const s = e.target.closest("summary"); if (s) { this.moreOpen = !s.parentElement.open; return; }
+      const a = e.target.closest("[data-nav]"); if (a) { e.preventDefault(); history.pushState(null, "", a.dataset.nav); window.dispatchEvent(new CustomEvent("location-changed")); return; }
       const g = e.target.closest("[data-detail]"); if (g && !e.target.closest("[data-tip]")) open(g);
     });
     this.shadowRoot.addEventListener("keydown", e => { const g = e.target.closest?.("[data-detail]"); if (g && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); open(g); } });
@@ -313,31 +377,34 @@ class PiVitalsCard extends HTMLElement {
   }
   render() {
     if (!this._hass || !this.config) return;
-    const cfg = this.config, C = this.C, H = this._hass.states, P = this.P;
-    const n = id => this.n(P + id), v = id => this.v(P + id);
+    const cfg = this.config, C = this.C, H = this._hass.states, R = this.R;
+    const n = id => this.n(this.S(id)), v = id => this.v(this.S(id));
     const hn = id => { const x = parseFloat(H[id]?.state); return Number.isFinite(x) ? x : null; };
-    const VA = H[cfg.vitals_entity]?.attributes || {}, watts = hn(cfg.vitals_entity);
+    const VA = H[R.vitals]?.attributes || {}, watts = hn(R.vitals);
     const cores = cfg.cores;
     const cpu = n("processor_use"), mem = n("memory_usage"), disk = n("disk_usage"), tRaw = n("processor_temperature");
-    const tU = H[P + "processor_temperature"]?.attributes?.unit_of_measurement || "°C", isF = /F/.test(tU);
+    const tU = H[this.S("processor_temperature")]?.attributes?.unit_of_measurement || "°C", isF = /F/.test(tU);
     const tC = tRaw == null ? null : isF ? (tRaw - 32) * 5 / 9 : tRaw;
     const tTxt = c => isF ? `${Math.round(c * 9 / 5 + 32)}` : c.toFixed(0);
     const memUse = n("memory_use"), memFree = n("memory_free"), memTot = memUse != null && memFree != null ? memUse + memFree : null;
     const dUse = n("disk_use"), dFree = n("disk_free"), dTot = dUse != null && dFree != null ? dUse + dFree : null;
     const swap = n("swap_usage"), swapUse = n("swap_use"), fan = n("pwmfan_fan_speed") ?? n("fan_speed");
     const l1 = n("load_1_min"), l5 = n("load_5_min"), l15 = n("load_15_min");
-    const ps = H[cfg.power_status_entity]?.state;
+    const ps = H[R.power]?.state;
     const thr = VA.throttled, tNow = thr?.now || [], tBoot = thr?.since_boot || [];
     const uvNow = ps === "on" || tNow.includes("under_voltage"), uvBoot = tBoot.includes("under_voltage");
     const slowNow = tNow.some(f => f !== "under_voltage"), slowBoot = tBoot.some(f => f !== "under_voltage");
     const boot = v("uptime") || v("last_boot"), up = boot ? this.dur(Date.now() - new Date(boot)) : null;
     const ver = id => H[id]?.attributes?.installed_version || "—";
-    const model = cfg.title || (H["update.raspberry_pi_5_firmware"] ? "Raspberry Pi 5" : Object.keys(H).some(k => /raspberry_pi_4/.test(k)) ? "Raspberry Pi 4" : "Raspberry Pi");
+    // model from pi_vitals (/proc/device-tree/model), else "Raspberry Pi" when the power checker exists; the board drawing only shows on a Pi
+    const model = cfg.title || (VA.model ? VA.model.replace(/ Model .*| Rev .*/, "") : R.rpiPower ? "Raspberry Pi" : "Home Assistant host");
+    const isPi = /raspberry/i.test(VA.model || "") || !!R.rpiPower || /raspberry/i.test(cfg.title || "");
     const tempColor = tC == null ? C.neutral : tC >= cfg.temp_bad_c ? C.bad : tC >= cfg.temp_warn_c ? C.warn : C.climate;
     const busy = (x, warn, bad) => x == null ? C.neutral : x >= bad ? C.bad : x >= warn ? C.warn : null;
     const gb = mib => (mib / 1024).toFixed(1);
     const ago = id => { const s = H[id]?.state; if (!s || ["unknown", "unavailable"].includes(s)) return null; const ms = Date.now() - new Date(s); return ms >= 0 ? this.dur(ms) + " ago" : "in " + this.dur(-ms); };
-    const backupAgeD = (() => { const s = H["sensor.backup_last_successful_automatic_backup"]?.state; const t = s && new Date(s); return t && !isNaN(t) ? (Date.now() - t) / 864e5 : null; })();
+    const bLast = R.backup.last_successful_automatic_backup || "sensor.backup_last_successful_automatic_backup", bNext = R.backup.next_scheduled_automatic_backup || "sensor.backup_next_scheduled_automatic_backup";
+    const backupAgeD = (() => { const s = H[bLast]?.state; const t = s && new Date(s); return t && !isNaN(t) ? (Date.now() - t) / 864e5 : null; })();
     const updates = Object.values(H).filter(e => e.entity_id.startsWith("update."));
     const pendingU = updates.filter(u => u.state === "on").sort((a, b) => (a.attributes.friendly_name || "").localeCompare(b.attributes.friendly_name || ""));
     const ifc = this.iface(), wired = !/^wl/.test(ifc);
@@ -354,15 +421,17 @@ class PiVitalsCard extends HTMLElement {
     if (slowBoot && !slowNow) issues.push([1, "Throttled earlier since boot"]);
     if ((tC ?? 0) >= cfg.temp_warn_c || (cpu ?? 0) >= 80 || (mem ?? 0) >= 75 || (disk ?? 0) >= 80) issues.push([1, "Working hard"]);
     if (backupAgeD != null && backupAgeD > cfg.backup_stale_days) issues.push([1, "Backups overdue"]);
-    const worst = issues.reduce((m, i) => Math.max(m, i[0]), 0);
-    const verdict = worst ? issues.find(i => i[0] === worst)[1] : "All systems normal";
-    const vColor = [C.ok, C.warn, C.bad][worst];
+    const worst = issues.reduce((m, i) => Math.max(m, i[0]), 0), noData = cpu == null && mem == null && disk == null && tC == null;
+    const verdict = noData ? "Waiting for system sensors" : worst ? issues.find(i => i[0] === worst)[1] : "All systems normal";
+    const vColor = noData ? C.neutral : [C.ok, C.warn, C.bad][worst];
 
     // board, redrawn only when its state changes
-    const bs = { soc: tempColor, chip: model.includes("5") ? "BCM2712" : "SoC", fan: fan == null ? null : fan > 0, fanDur: fan ? Math.max(0.25, Math.round(2400 / fan * 4) / 4) : 1,
+    const bs = { soc: tempColor, chip: /Pi 5/.test(model) ? "BCM2712" : /Pi 4/.test(model) ? "BCM2711" : "SoC", fan: fan == null ? null : fan > 0, fanDur: fan ? Math.max(0.25, Math.round(2400 / fan * 4) / 4) : 1,
       led: uvNow ? C.bad : C.ok, wifi: wifiBars, sd: (VA.disk_write_kbs ?? 0) > 50 && /^mmcblk/.test(VA.disk_device || "") };
     const bsig = JSON.stringify(bs);
-    if (bsig !== this.boardSig) { this.boardSig = bsig; this.shadowRoot.querySelector(".board").innerHTML = this.board(bs); }
+    const boardEl = this.shadowRoot.querySelector(".board");
+    boardEl.hidden = !isPi; this.shadowRoot.querySelector(".hero").classList.toggle("solo", !isPi);
+    if (isPi && bsig !== this.boardSig) { this.boardSig = bsig; boardEl.innerHTML = this.board(bs); }
 
     // checklist rows
     const dot = c => `<i style="background:${c}"></i>`;
@@ -370,7 +439,7 @@ class PiVitalsCard extends HTMLElement {
     if (watts != null || ps) checks.push([uvNow ? C.bad : uvBoot ? C.warn : C.ok, "Power", `${uvNow ? "Under-voltage now" : uvBoot ? "Dipped since boot" : "Stable since boot"}${watts != null ? ` <span>· ${watts.toFixed(2)} W</span>` : ""}`, "uv"]);
     if (thr) checks.push([slowNow ? C.bad : slowBoot ? C.warn : C.ok, "Throttling", `${slowNow ? "Active now" : slowBoot ? "Earlier since boot" : "None since boot"}${VA.arm_mhz ? ` <span>· ${VA.arm_mhz.toLocaleString()} MHz</span>` : ""}`, "throttle"]);
     if (disk != null) checks.push([busy(disk, 80, 90) || C.ok, "Storage", `${devKind(VA.disk_device) || "Disk"} · ${Math.round(disk)}% used${VA.db_mb ? ` <span>· DB ${VA.db_mb >= 1000 ? (VA.db_mb / 1000).toFixed(1) + " GB" : Math.round(VA.db_mb) + " MB"}</span>` : ""}`, "storage"]);
-    if (H["sensor.backup_last_successful_automatic_backup"]) checks.push([backupAgeD == null ? C.neutral : backupAgeD > cfg.backup_stale_days ? C.warn : C.ok, "Backups", `${ago("sensor.backup_last_successful_automatic_backup") || "None yet"}${ago("sensor.backup_next_scheduled_automatic_backup") ? ` <span>· next ${ago("sensor.backup_next_scheduled_automatic_backup")}</span>` : ""}`, "backup"]);
+    if (H[bLast]) checks.push([backupAgeD == null ? C.neutral : backupAgeD > cfg.backup_stale_days ? C.warn : C.ok, "Backups", `${ago(bLast) || "None yet"}${ago(bNext) ? ` <span>· next ${ago(bNext)}</span>` : ""}`, "backup"]);
     checks.push([pendingU.length ? C.warn : C.ok, "Updates", pendingU.length ? `${pendingU.length} available <span>· ${pendingU.slice(0, 2).map(u => (u.attributes.friendly_name || "").replace(/ update$/i, "")).join(", ")}${pendingU.length > 2 ? "…" : ""}</span>` : `All current <span>· ${updates.length} tracked</span>`, "updates"]);
     if (wired) checks.push([C.ok, "Network", `Ethernet <span>· ${ifc}</span>`, "net"]);
     else if (dbm != null) checks.push([dbm > -67 ? C.ok : dbm > -75 ? C.warn : C.bad, "Wi-Fi", `${dbm > -60 ? "Excellent" : dbm > -70 ? "Good" : dbm > -75 ? "Fair" : "Weak"} <span>· ${dbm} dBm</span>`, "wifi"]);
@@ -382,13 +451,13 @@ class PiVitalsCard extends HTMLElement {
 
     // gauges
     const gauges = [
-      ["CPU", "cpu", cpu == null ? "—" : Math.round(cpu), "%", cpu, busy(cpu, 60, 85) || C.accent, cpu == null ? "" : `load ${l1 ?? "—"} · ${cores} cores`, `${P}processor_use|CPU|infra|0|6H`],
-      ["Memory", "mem", mem == null ? "—" : Math.round(mem), "%", mem, busy(mem, 70, 90) || C.accent, memTot ? `${gb(memUse)} of ${gb(memTot)} GB` : "", `${P}memory_usage|Memory|infra|0|6H`],
-      ["Disk", "disk", disk == null ? "—" : Math.round(disk), "%", disk, busy(disk, 75, 90) || C.accent, dTot ? `${dUse.toFixed(1)} of ${dTot.toFixed(0)} GB` : "", `${P}disk_usage|Disk|infra|1|7D`],
-      ["Temp", "temp", tC == null ? "—" : tTxt(tC), tU, tC == null ? 0 : tC / 85 * 100, tempColor, tC == null ? "" : `${isF ? tC.toFixed(1) + " °C · " : ""}${fan != null ? (fan ? Math.round(fan).toLocaleString() + " rpm" : "fan idle") : ""}`.replace(/ · $/, ""), `${P}processor_temperature|CPU temperature|climate|1|1H`],
+      ["CPU", "cpu", cpu == null ? "—" : Math.round(cpu), "%", cpu, busy(cpu, 60, 85) || C.accent, cpu == null ? "" : `${l1 != null ? `load ${l1} · ` : ""}${cores} cores`, `${this.S("processor_use")}|CPU|infra|0|6H`],
+      ["Memory", "mem", mem == null ? "—" : Math.round(mem), "%", mem, busy(mem, 70, 90) || C.accent, memTot ? `${gb(memUse)} of ${gb(memTot)} GB` : "", `${this.S("memory_usage")}|Memory|infra|0|6H`],
+      ["Disk", "disk", disk == null ? "—" : Math.round(disk), "%", disk, busy(disk, 75, 90) || C.accent, dTot ? `${dUse.toFixed(1)} of ${dTot.toFixed(0)} GB` : "", `${this.S("disk_usage")}|Disk|infra|1|7D`],
+      ["Temp", "temp", tC == null ? "—" : tTxt(tC), tU, tC == null ? 0 : tC / 85 * 100, tempColor, tC == null ? "" : `${isF ? tC.toFixed(1) + " °C · " : ""}${fan != null ? (fan ? Math.round(fan).toLocaleString() + " rpm" : "fan idle") : ""}`.replace(/ · $/, ""), `${this.S("processor_temperature")}|CPU temperature|climate|1|1H`],
     ];
-    if (watts != null) gauges.push(["Power", "power_g", watts.toFixed(2), "W", watts / cfg.power_max_w * 100, C.accent, "board · USB excluded", `${cfg.vitals_entity}|Pi board power|infra|2|6H`]);
-    const gaugesHtml = gauges.map(([name, t, val, u, pct, col, sub, det]) => `<div class="gauge" data-detail="${det}" role="button" tabindex="0" aria-label="Open ${name} history">
+    if (watts != null) gauges.push(["Power", "power_g", watts.toFixed(2), "W", watts / cfg.power_max_w * 100, C.accent, "board · USB excluded", `${R.vitals}|Pi board power|infra|2|6H`]);
+    const gaugesHtml = gauges.filter(g => H[g[7].split("|")[0]]).map(([name, t, val, u, pct, col, sub, det]) => `<div class="gauge" data-detail="${det}" role="button" tabindex="0" aria-label="Open ${name} history">
       <div class="g">${this.gauge(pct, col)}<div class="gv"><b>${val}</b><span>${u}</span></div></div>
       <div class="k">${name} ${this.tip(t)}</div><div class="sub">${sub}</div></div>`).join("");
 
@@ -416,7 +485,7 @@ class PiVitalsCard extends HTMLElement {
     const flagPills = (list, cls) => list.length ? `<span class="flags">${list.map(f => `<span class="pill ${cls}">${flagName[f] || f}</span>`).join("")}</span>` : `<span class="pill on">None</span>`;
     const perf = `<div class="panel"><div class="k">Power & performance</div><div class="kvs">
       ${watts != null ? kvr("Board power", `${watts.toFixed(2)} W`, "power_g") : ""}
-      ${VA.arm_mhz ? kvr("CPU clock", `${VA.arm_mhz.toLocaleString()} MHz${model.includes("5") ? ` <span class="x">of 2,400</span>` : ""}`, "clock") : ""}
+      ${VA.arm_mhz ? kvr("CPU clock", `${VA.arm_mhz.toLocaleString()} MHz${/Pi 5/.test(model) ? ` <span class="x">of 2,400</span>` : ""}`, "clock") : ""}
       ${thr ? kvr("Throttling now", flagPills(tNow, "bad"), "throttle") + kvr("Since boot", flagPills(tBoot, "upd"), "throttle") : ""}
       ${!thr && ps ? kvr("Power supply", ps === "on" ? `<span class="pill bad">Under-voltage</span>` : `<span class="pill on">OK</span>`, "uv") : ""}
       ${fan != null ? kvr("Fan", fan ? `${Math.round(fan).toLocaleString()} rpm <span class="x">· ${Math.round(fan / cfg.fan_max_rpm * 100)}%</span>` : "Idle", "fan") : ""}
@@ -424,26 +493,31 @@ class PiVitalsCard extends HTMLElement {
     </div></div>`;
     // backups & updates panel
     const care = `<div class="panel"><div class="k">Backups & updates</div><div class="kvs">
-      ${H["sensor.backup_last_successful_automatic_backup"] ? kvr("Last backup", ago("sensor.backup_last_successful_automatic_backup") || "—", "backup") + kvr("Next backup", ago("sensor.backup_next_scheduled_automatic_backup") || "—") : ""}
+      ${H[bLast] ? kvr("Last backup", ago(bLast) || "—", "backup") + kvr("Next backup", ago(bNext) || "—") : ""}
       ${pendingU.length ? pendingU.map(u => kvr((u.attributes.friendly_name || u.entity_id).replace(/ update$/i, ""), `<span class="x">${u.attributes.installed_version ?? ""} →</span> <span class="pill upd">${u.attributes.latest_version}</span>`)).join("")
         : kvr("Updates", `<span class="pill on">All ${updates.length} current</span>`, "updates")}
     </div></div>`;
 
     // apps
     const pct1 = x => x == null ? "—" : (x < 10 ? x.toFixed(1) : Math.round(x)) + "%";
-    const coreC = hn("sensor.home_assistant_core_cpu_percent"), coreM = hn("sensor.home_assistant_core_memory_percent");
-    const supC = hn("sensor.home_assistant_supervisor_cpu_percent"), supM = hn("sensor.home_assistant_supervisor_memory_percent");
-    const apps = Object.keys(H).map(k => k.match(/^binary_sensor\.(.+)_running$/)).filter(m => m && H[`sensor.${m[1]}_version`]).map(m => m[1]);
-    const appName = slug => (H[`switch.${slug}`]?.attributes?.friendly_name || H[`update.${slug}_update`]?.attributes?.title || slug.replace(/_/g, " ")).replace(/^\w/, c => c.toUpperCase());
-    const appsHtml = cfg.show_apps === false ? "" : `<div class="panel"><div class="k">Apps ${this.tip("apps")}</div>
+    const sys = [["Home Assistant Core", R.sys.core], ["Supervisor", R.sys.supervisor]].filter(([, d]) => d);
+    const stateOf = id => id ? H[id]?.state : undefined;
+    const appsHtml = cfg.show_apps === false || !(sys.length || R.apps.length) ? "" : `<div class="panel"><div class="k">Apps ${this.tip("apps")}</div>
       <table class="apps"><tr><th>App</th><th>Status</th><th>CPU</th><th>RAM</th><th>Version</th></tr>
-        ${coreC != null || coreM != null ? [["Home Assistant Core", coreC, coreM, ver("update.home_assistant_core_update")], ["Supervisor", supC, supM, ver("update.home_assistant_supervisor_update")]].map(([nm, c, m, vv]) =>
-          `<tr><td>${nm} <span class="sub">system</span></td><td><span class="pill on"><span class="pt">Running</span></span></td><td>${pct1(c)}</td><td>${pct1(m)}</td><td>${vv}</td></tr>`).join("") : ""}
-        ${apps.map(a => { const run = H[`binary_sensor.${a}_running`]?.state === "on", upd = H[`update.${a}_update`]?.state === "on";
-          return `<tr><td>${appName(a)}</td><td><span class="pill ${run ? "on" : "off"}" title="${run ? "Running" : "Stopped"}"><span class="pt">${run ? "Running" : "Stopped"}</span></span></td>
-            <td>${run ? pct1(hn(`sensor.${a}_cpu_percent`)) : "—"}</td><td>${run ? pct1(hn(`sensor.${a}_memory_percent`)) : "—"}</td>
-            <td>${H[`sensor.${a}_version`]?.state || "—"}${upd ? ` <span class="pill upd">→ ${H[`sensor.${a}_newest_version`]?.state}</span>` : ""}</td></tr>`; }).join("")}</table></div>`;
+        ${sys.map(([nm, d]) =>
+          `<tr><td>${nm} <span class="sub">system</span></td><td><span class="pill on"><span class="pt">Running</span></span></td><td>${pct1(hn(d.cpu_percent))}</td><td>${pct1(hn(d.memory_percent))}</td><td>${ver(d.update)}</td></tr>`).join("")}
+        ${R.apps.map(a => { const run = stateOf(a.running) === "on", upd = stateOf(a.update) === "on";
+          return `<tr><td>${a.name}</td><td><span class="pill ${run ? "on" : "off"}" title="${run ? "Running" : "Stopped"}"><span class="pt">${run ? "Running" : "Stopped"}</span></span></td>
+            <td>${run ? pct1(hn(a.cpu_percent)) : "—"}</td><td>${run ? pct1(hn(a.memory_percent)) : "—"}</td>
+            <td>${stateOf(a.version) || "—"}${upd ? ` <span class="pill upd">→ ${stateOf(a.version_latest) || H[a.update]?.attributes?.latest_version}</span>` : ""}</td></tr>`; }).join("")}</table></div>`;
 
+    // setup help: System Monitor missing, or some of its sensors still off (it ships with most disabled)
+    const smLink = `<a data-nav="/config/integrations/integration/systemmonitor">Open System Monitor ›</a>`;
+    const missing = R.hasSM ? PV_NEEDED.filter(([k]) => !R.sm[k]?.length).map(([, nm]) => nm) : [];
+    const setup = this.legacy || R.noRegistry ? "" : !R.hasSM
+      ? `<div class="setup"><ha-icon icon="mdi:wrench-outline"></ha-icon><div><b>Add the System Monitor integration</b> (Settings → Devices & services → Add integration → System Monitor), then turn on its sensors: most are off by default. <a data-nav="/config/integrations/dashboard">Open integrations ›</a></div></div>`
+      : missing.length ? `<div class="setup"><ha-icon icon="mdi:toggle-switch-off-outline"></ha-icon><div><b>${missing.length === 1 ? "1 sensor is" : missing.length + " sensors are"} off:</b> ${missing.join(", ")}. Turn ${missing.length === 1 ? "it" : "them"} on in System Monitor's entity list. ${smLink}</div></div>` : "";
+    const vitalsHint = isPi && !H[R.vitals] ? `<div class="foot" style="margin-top:12px">Board power, throttling, CPU clock and SD-card wear come from the optional pi_vitals sensor (see the card's README).</div>` : "";
     // more details drawer
     const psiChip = x => x == null ? ["—", C.text3] : x >= 10 ? [x.toFixed(1) + "%", C.bad] : x >= 1 ? [x.toFixed(1) + "%", C.warn] : [x.toFixed(1) + "%", C.ok];
     const pv = (r, w) => n(`${r}_pressure_${w}_average`);
@@ -462,7 +536,7 @@ class PiVitalsCard extends HTMLElement {
             <div class="bar"><span style="width:${mem ?? 0}%;background:${C.accent}"></span></div></div>
           <div class="row"><div class="rowh"><span>Swap ${this.tip("swap")}</span><span><b>${swapUse != null ? Math.round(swapUse) : "—"} MB</b> · ${swap ?? "—"}%</span></div>
             <div class="bar"><span style="width:${swap ?? 0}%;background:${C.accent}"></span></div></div>
-          <div class="kv"><div><div class="sub">Disk total</div><div class="num"><b>${hn("sensor.home_assistant_host_disk_total") ?? (dTot ? dTot.toFixed(0) : "—")}</b><span>GB</span></div></div>
+          <div class="kv"><div><div class="sub">Disk total</div><div class="num"><b>${hn(R.sys.host?.disk_total) ?? (dTot ? dTot.toFixed(0) : "—")}</b><span>GB</span></div></div>
             <div><div class="sub">RAM total</div><div class="num"><b>${memTot ? gb(memTot) : "—"}</b><span>GB</span></div></div></div></div>
         <div class="panel"><div class="k">Load average ${this.tip("load")}</div>
           <div class="loads">${[["1 min", l1], ["5 min", l5], ["15 min", l15]].map(([k, x]) => `<div><div class="sub">${k}</div><div class="num"><b>${x != null ? x.toFixed(2) : "—"}</b></div>${loadBar(x)}</div>`).join("")}</div>
@@ -482,13 +556,13 @@ class PiVitalsCard extends HTMLElement {
         <div class="fact"><div class="k">Uptime ${this.tip("uptime")}</div><div class="val">${up || "—"} <span class="sub">· booted ${boot ? new Date(boot).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) : "—"}</span></div></div>
         <div class="fact"><div class="k">Local IP ${this.tip("ip")}</div><div class="val mono">${ipv4 ?? "—"} <span class="sub">${ifc}</span></div></div>
         <div class="fact"><div class="k">Home Assistant ${this.tip("ha_stats")}</div><div class="val">${Object.keys(H).length.toLocaleString()} entities <span class="sub">· ${count("automation")} automations · ${count("script")} scripts</span></div></div>
-        <div class="fact"><div class="k">Platform ${this.tip("ha")}</div><div class="val">OS ${H["sensor.home_assistant_operating_system_version"]?.state ?? "—"} <span class="sub">· Core ${ver("update.home_assistant_core_update")}${H["update.raspberry_pi_5_firmware"] ? " · FW " + ver("update.raspberry_pi_5_firmware") : ""}</span></div></div>
+        <div class="fact"><div class="k">Platform ${this.tip("ha")}</div><div class="val">${R.sys.os ? `OS ${stateOf(R.sys.os.version) ?? "—"} · ` : ""}<span class="sub">Core ${ver(R.sys.core?.update)}${VA.model ? " · " + VA.model : ""}</span></div></div>
       </div>
-      ${cfg.footer ? `<div class="foot" style="margin-top:12px">${cfg.footer}</div>` : ""}
+      ${cfg.footer ? `<div class="foot" style="margin-top:12px">${cfg.footer}</div>` : ""}${vitalsHint}
     </details>`;
 
     const body = this.shadowRoot.querySelector(".body");
-    body.innerHTML = `
+    body.innerHTML = `${setup}
       <div class="gauges">${gaugesHtml}</div>
       <div class="panel"><div class="k live-k"><span class="pulse"></span>Live · last 10 minutes ${this.tip("live")}</div><div class="sparks">${sparks}</div></div>
       <div class="grid3">${storage}${perf}${care}</div>

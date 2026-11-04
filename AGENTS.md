@@ -10,5 +10,5 @@ Public Home Assistant card (Raspberry Pi health) that Sam is preparing to publis
 ## Before publishing (needs Sam's OK)
 - Screenshots in `images/` (light, dark, phone): blur the IP and anything personal. README references `images/pi-vitals-light.png`.
 - Replace `<you>` in README with the GitHub username, create the public repo, push, tag a release (`v1.0.0`), check the HACS validation action passes.
-- Not yet tested beyond Sam's Pi 5 on Wi-Fi (Pi 4, Ethernet, non-English installs, missing sensors).
+- Hardened 2026-11-03: sensors resolved by integration + translation key; setup banner; simulated German / Pi 4 Ethernet °C / non-Pi / no System Monitor. Still untested on real hardware other than Sam's Pi 5.
 - Never copy anything else from home-assistant here (configs, tokens, network details).
