@@ -5,9 +5,9 @@ A Raspberry Pi health dashboard for Home Assistant, in a single card. It's built
 ![Pi Vitals card](images/pi-vitals-light.png)
 
 - **A live board drawing.** A line-art Pi whose parts light up from real data: the processor takes the temperature color, the cooler spins at the real fan speed, the power LED turns red on under-voltage, the Wi-Fi arcs show signal strength, and the SD slot blinks while the Pi writes to it.
-- **A verdict with its reasons.** "All systems normal" (or the worst problem), plus a checklist: power, throttling, storage, backups, updates, Wi-Fi.
-- **270° gauges** for CPU, memory, disk, temperature and board power. Tap one for its history.
-- **Live sparklines** covering the last 10 minutes.
+- **A verdict with its reasons.** "All systems normal" (or the worst problem), plus status facts beside the board: power, throttling, storage, backups, updates, Wi-Fi.
+- **Ring gauges** for CPU, memory, disk and temperature. Tap one for its history.
+- **Live sparklines** covering the last 10 minutes. Hover (or drag on a phone) to read any moment.
 - **Storage wear.** Disk use, database size and daily growth, data written since boot, and the write rate now.
 - **Power & performance.** Throttle flags (now and since boot), measured CPU clock, fan speed, Wi-Fi signal.
 - **Backups, updates and apps.** Only pending updates are listed, plus each app's CPU and RAM.
@@ -72,7 +72,6 @@ All optional.
 | `power_status_entity` | auto (Raspberry Pi Power Supply Checker) | Under-voltage sensor |
 | `cores` | `4` | Used for load % |
 | `fan_max_rpm` | `8000` | Fan % scale (Pi 5 Active Cooler) |
-| `power_max_w` | `10` | Power gauge scale |
 | `temp_warn_c` / `temp_bad_c` | `65` / `80` | Temperature thresholds, °C (works with °F sensors too) |
 | `backup_stale_days` | `3` | Warn when the last backup is older than this |
 | `backup_note` | — | Extra sentence for the backup tooltip ("Also copied to my NAS") |

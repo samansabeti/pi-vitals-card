@@ -1,5 +1,5 @@
 // Pi Vitals: one-card health view of the Raspberry Pi running Home Assistant.
-// Line-art board whose parts light up by status, a verdict with its reasons, 270° gauges, live sparklines,
+// Line-art board whose parts light up by status, status facts, ring gauges, live sparklines with hover,
 // storage wear, power and throttling, backups and updates, apps, and a collapsed "more details" drawer.
 // Reads System Monitor sensors plus the optional pi_vitals.py command_line sensor (power, throttle flags, clock,
 // Wi-Fi signal, SD writes, database growth). Everything optional hides cleanly when its sensor is missing.
@@ -196,71 +196,68 @@ class PiVitalsCard extends HTMLElement {
     const fill = "var(--sh-fill, rgba(118,118,128,.12))", border = "var(--sh-border, rgba(0,0,0,.08))", text = "var(--sh-text, var(--primary-text-color))",
       text2 = "var(--sh-text-2, var(--secondary-text-color))", text3 = "var(--sh-text-3, var(--secondary-text-color))";
     this.shadowRoot.innerHTML = `<style>
-      :host{display:block;--pv-mono:ui-monospace,"SF Mono","JetBrains Mono","Cascadia Mono",Menlo,Consolas,monospace}
+      :host{display:block}
       ha-card{container:card/inline-size;padding:16px;font-family:inherit;color:${text};-webkit-font-smoothing:antialiased}
       .body{display:flex;flex-direction:column;gap:16px;margin-top:16px}
-      .k{font-family:var(--pv-mono);font-size:10.5px;font-weight:500;color:${text3};text-transform:uppercase;letter-spacing:.07em}
+      .head{display:flex;align-items:center;gap:6px;margin-bottom:14px;min-width:0}.head ha-icon{--mdc-icon-size:18px;color:var(--pv-accent, var(--sh-infra, #0071E3))}
+      .title{font-size:15px;font-weight:600;color:var(--pv-accent, var(--sh-infra, #0071E3));white-space:nowrap}
+      .upt{flex:1;min-width:0;font-size:13px;color:${text2};white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-variant-numeric:tabular-nums}
+      .status{display:inline-flex;align-items:center;gap:6px;height:22px;box-sizing:border-box;padding:0 8px;border-radius:999px;background:${fill};font-size:12px;font-weight:500;color:${text2};white-space:nowrap}
+      .status i{flex:none;width:6px;height:6px;border-radius:50%}
+      .status .i{color:inherit;margin-left:0}
+      .k{font-size:11px;font-weight:500;color:${text3};text-transform:uppercase;letter-spacing:.04em}
       .num{font-variant-numeric:tabular-nums;line-height:1.1}
-      .num b{font-family:var(--pv-mono);font-size:24px;font-weight:600;letter-spacing:-0.03em;color:${text}}.num span{font-size:12px;font-weight:500;color:${text2};margin-left:3px}
-      .sub{font-size:12.5px;color:${text2};font-variant-numeric:tabular-nums}
-      .mono{font-family:var(--pv-mono);font-variant-numeric:tabular-nums}
-      /* hero: board drawing on graph paper + verdict */
-      .hero{display:grid;grid-template-columns:minmax(0,300px) minmax(0,1fr);gap:20px;align-items:start}
-      .board{border-radius:6px;border:1px solid ${border};padding:14px 12px;display:grid;place-items:center;
-        background:radial-gradient(color-mix(in srgb, ${text3} 30%, transparent) .8px, transparent .9px) 0 0/12px 12px, var(--sh-surface-2, #FAFAFB)}
-      .board svg{width:100%;max-width:280px;height:auto;overflow:visible}
-      .board .pcb{fill:var(--sh-surface, var(--card-background-color, #fff));stroke:${text3};stroke-width:1.2}
-      .board .ln{fill:none;stroke:${text3};stroke-width:1.1}
-      .board .pt{fill:var(--sh-surface, #fff);stroke:${text3};stroke-width:1.1}
+      .num b{font-size:28px;font-weight:600;letter-spacing:-0.02em;color:${text}}.num span{font-size:13px;font-weight:500;color:${text2};margin-left:2px}
+      .sub{font-size:13px;color:${text2};font-variant-numeric:tabular-nums}
+      /* hero: board drawing + status facts */
+      .hero{display:grid;grid-template-columns:minmax(0,272px) minmax(0,1fr);gap:16px;align-items:stretch}
+      .hero.solo{grid-template-columns:1fr}
+      .board{background:var(--sh-surface-2, #FAFAFB);border:1px solid ${border};border-radius:10px;padding:10px 12px;display:grid;place-items:center}
+      .board svg{width:100%;max-width:248px;height:auto;overflow:visible;display:block}
+      .board .pcb{fill:var(--sh-surface, var(--card-background-color, #fff));stroke:${text3};stroke-width:1}
+      .board .ln{fill:none;stroke:${text3};stroke-width:.9}
+      .board .pt{fill:var(--sh-surface, var(--card-background-color, #fff));stroke:${text3};stroke-width:.9}
       .board .pin{fill:${text3};opacity:.55}
-      .board .lbl{font-family:var(--pv-mono);font-size:6.5px;fill:${text3};letter-spacing:.06em}
+      .board .lbl{font-family:inherit;font-size:5.6px;font-weight:600;fill:${text3};letter-spacing:.08em}
       .board [data-tip]{cursor:help}
       .board .fan{transform-box:fill-box;transform-origin:center;animation:spin var(--d,1s) linear infinite}
       .board .fan.off{animation:none}
       .board .sd.on{animation:blink 1.2s ease-in-out infinite}
-      .board .led{filter:drop-shadow(0 0 2px currentColor)}
       @keyframes spin{to{transform:rotate(360deg)}}@keyframes blink{50%{opacity:.35}}
       @media (prefers-reduced-motion:reduce){.board .fan,.board .sd.on{animation:none}}
-      .hero.solo{grid-template-columns:1fr}
-      .setup{display:flex;gap:10px;align-items:flex-start;border:1px solid color-mix(in srgb, var(--sh-warn, #D97706) 35%, transparent);background:color-mix(in srgb, var(--sh-warn, #D97706) 7%, transparent);border-radius:6px;padding:10px 12px;font-size:13px;line-height:1.45}
-      .setup ha-icon{--mdc-icon-size:18px;color:var(--sh-warn, #D97706);flex:none;margin-top:1px}
-      .setup b{font-weight:600}
-      .setup a{color:var(--sh-accent, #2563EB);cursor:pointer;text-decoration:none;font-weight:500;white-space:nowrap}
-      .verdict{container:verdict/inline-size;display:flex;flex-direction:column;gap:10px;min-width:0}
-      .vhead{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap}
-      .model{font-family:var(--pv-mono);font-size:11px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;color:var(--pv-accent, var(--sh-infra, #2563EB))}
-      .upt{margin-left:auto;font-family:var(--pv-mono);font-size:11px;color:${text3}}
-      .vtitle{display:flex;align-items:center;gap:10px;font-size:20px;font-weight:600;letter-spacing:-0.01em}
-      .vtitle i{flex:none;width:10px;height:10px;border-radius:50%;box-shadow:0 0 0 4px color-mix(in srgb, currentColor 0%, transparent)}
-      .checks{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:0 18px}
-      .check{display:grid;grid-template-columns:8px 84px minmax(0,1fr) auto;align-items:baseline;gap:8px;padding:7px 0;border-top:1px solid ${border};font-size:13px}
-      .check i{width:6px;height:6px;border-radius:50%;transform:translateY(-1px)}
-      .check .ck{font-family:var(--pv-mono);font-size:10.5px;text-transform:uppercase;letter-spacing:.07em;color:${text3}}
-      .check .cv{color:${text};font-variant-numeric:tabular-nums;overflow:hidden;text-overflow:ellipsis}
-      .check .cv span{color:${text2}}
-      /* gauges */
-      .gauges{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:8px}
-      .gauge{display:flex;flex-direction:column;align-items:center;text-align:center;gap:2px;padding:6px 4px;border-radius:6px}
-      .gauge[data-detail]{cursor:pointer;transition:background .15s}
-      .gauge[data-detail]:hover,.gauge[data-detail]:focus-visible{background:${fill};outline:none}
-      .gauge .g{position:relative;width:96px;height:84px}
-      .gauge svg{width:96px;height:96px;position:absolute;top:0;left:0}
-      .gauge circle{fill:none;stroke-width:6;stroke-linecap:round}
-      .gauge .trk{stroke:${fill}}.gauge .val{transition:stroke-dasharray .6s ease,stroke .3s}
-      .gauge .tick{stroke:${text3};stroke-width:1;opacity:.6}.gauge .tick.maj{stroke-width:1.4;opacity:.9}
-      .gauge .gv{position:absolute;inset:0 0 6px;display:flex;flex-direction:column;align-items:center;justify-content:center}
-      .gauge .gv b{font-family:var(--pv-mono);font-size:21px;font-weight:600;letter-spacing:-0.04em;font-variant-numeric:tabular-nums}
-      .gauge .gv span{font-family:var(--pv-mono);font-size:10px;color:${text2};margin-top:1px}
-      .gauge .sub{font-size:12px;line-height:1.3}
+      .facts2{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px 16px;align-content:center;min-width:0}
+      .fx{min-width:0}
+      .fx .k{display:flex;align-items:center;gap:6px}.fx .k i{flex:none;width:6px;height:6px;border-radius:50%}
+      .fx .val{font-size:15px;font-weight:600;color:${text};margin-top:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-variant-numeric:tabular-nums}
+      .fx .sub{margin-top:1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+      /* rings */
+      .rings{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;align-items:start}
+      .ring{display:flex;align-items:center;gap:10px;min-width:0}
+      .ring[data-detail]{cursor:pointer;border-radius:10px;margin:-4px;padding:4px;transition:background .15s}
+      .ring[data-detail]:hover,.ring[data-detail]:focus-visible{background:${fill};outline:none}
+      .ring svg{flex:none;width:58px;height:58px;transform:rotate(-90deg)}
+      .ring circle{fill:none;stroke-width:7;stroke-linecap:round}
+      .ring .trk{stroke:${fill}}
+      .ring .val{transition:stroke-dashoffset .6s ease,stroke .3s}
+      .ring>div{min-width:0}
       /* panels */
-      .panel{background:var(--sh-surface-2, #FAFAFB);border:1px solid ${border};border-radius:6px;padding:12px 14px}
+      .panel{background:var(--sh-surface-2, #FAFAFB);border:1px solid ${border};border-radius:10px;padding:12px 14px}
       .live-k{display:flex;align-items:center;gap:6px}
       .pulse{width:6px;height:6px;border-radius:50%;background:var(--sh-ok, #1F9D45);box-shadow:0 0 0 0 color-mix(in srgb, var(--sh-ok, #1F9D45) 60%, transparent);animation:p 2s infinite}
       @keyframes p{70%{box-shadow:0 0 0 6px color-mix(in srgb, var(--sh-ok, #1F9D45) 0%, transparent)}100%{box-shadow:0 0 0 0 color-mix(in srgb, var(--sh-ok, #1F9D45) 0%, transparent)}}
       .sparks{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:14px;margin-top:10px}
-      .spark .num b{font-size:17px;letter-spacing:-0.02em}
-      .spark svg{display:block;width:100%;height:40px;margin-top:4px;overflow:visible}
-      .spark .lbl{font-size:12px;font-weight:500;color:${text2};white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+      .spark{min-width:0}
+      .spark .num b{font-size:18px;letter-spacing:-0.01em}
+      .spark .lbl{display:flex;align-items:center;gap:5px;font-size:12px;font-weight:500;color:${text2};white-space:nowrap}
+      .spark .lbl i{flex:none;width:6px;height:6px;border-radius:50%}
+      .sv{position:relative;margin-top:4px;touch-action:pan-y;cursor:crosshair;-webkit-user-select:none;user-select:none}
+      .sv svg{display:block;width:100%;height:44px;overflow:visible}
+      .scur{position:absolute;top:0;bottom:0;width:1px;background:${text3};pointer-events:none;display:none}
+      .sdot{position:absolute;width:9px;height:9px;box-sizing:border-box;border-radius:50%;border:2px solid var(--sh-surface, var(--card-background-color, #fff));transform:translate(-50%,-50%);pointer-events:none;display:none}
+      .stip{position:absolute;bottom:100%;margin-bottom:6px;pointer-events:none;background:var(--sh-surface, var(--card-background-color, #fff));border:1px solid ${border};border-radius:10px;box-shadow:0 8px 24px rgba(0,0,0,.18);padding:6px 10px;white-space:nowrap;display:none;z-index:3}
+      .stip b{font-size:17px;font-weight:600;font-variant-numeric:tabular-nums;color:${text}}.stip span{font-size:12px;color:${text2}}
+      .stip div{font-size:12px;color:${text2};font-variant-numeric:tabular-nums}
+      .sv.on .scur,.sv.on .sdot,.sv.on .stip{display:block}
       .grid3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
       .row{margin-top:10px}
       .rowh{display:flex;justify-content:space-between;align-items:baseline;gap:8px;font-size:13px;color:${text2}}
@@ -268,25 +265,25 @@ class PiVitalsCard extends HTMLElement {
       .bar{display:flex;height:6px;border-radius:999px;overflow:hidden;background:${fill};margin-top:6px}
       .bar span{display:block;height:100%;border-radius:999px;transition:width .6s ease}
       .kvs{margin-top:6px}
-      .kvr{display:flex;justify-content:space-between;align-items:baseline;gap:10px;padding:7px 0;border-top:1px solid ${border};font-size:13px;color:${text2}}
+      .kvr{display:flex;justify-content:space-between;align-items:baseline;gap:10px;padding:8px 0;border-top:1px solid ${border};font-size:13px;color:${text2}}
       .kvr:first-child{border-top:0}
       .kvr>span:first-child{white-space:nowrap}
       .kvr b{font-weight:600;color:${text};font-variant-numeric:tabular-nums;text-align:right}
-      .kvr .x{font-weight:400;color:${text3}}
+      .kvr .x{font-weight:400;color:${text2}}
       .flags{display:flex;flex-wrap:wrap;gap:4px;justify-content:flex-end}
       .loads{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin-top:8px}
-      .loads .num b{font-size:19px}
-      .mini{height:6px;border-radius:999px;background:${fill};margin-top:6px;overflow:hidden}.mini span{display:block;height:100%;background:var(--pv-accent, var(--sh-infra, #2563EB));border-radius:999px}
+      .loads .num b{font-size:22px}
+      .mini{height:6px;border-radius:999px;background:${fill};margin-top:6px;overflow:hidden}.mini span{display:block;height:100%;background:var(--pv-accent, var(--sh-infra, #0071E3));border-radius:999px}
       .facts{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px 16px;margin-top:12px}
-      .fact .val{font-size:13.5px;font-weight:600;color:${text};font-variant-numeric:tabular-nums;margin-top:4px}
+      .fact .val{font-size:14px;font-weight:600;color:${text};font-variant-numeric:tabular-nums;margin-top:4px}
       .foot{font-size:12px;color:${text3}}
       .i{display:inline-grid;place-items:center;cursor:help;color:${text3};vertical-align:middle;outline:none;margin-left:2px}
-      .i ha-icon{--mdc-icon-size:14px}.i:hover,.i:focus{color:var(--sh-accent, #2563EB)}
+      .i ha-icon{--mdc-icon-size:14px}.i:hover,.i:focus{color:var(--sh-accent, #0071E3)}
       .k .i ha-icon{--mdc-icon-size:13px}
-      .tipbox{position:fixed;z-index:10;max-width:280px;background:var(--sh-surface, var(--card-background-color, #FFFFFF));color:${text};border:1px solid ${border};font-size:13px;line-height:1.4;padding:10px 12px;border-radius:8px;box-shadow:var(--sh-overlay-shadow, 0 8px 24px rgba(0,0,0,.14));pointer-events:none;opacity:0;transition:opacity .12s;text-transform:none;letter-spacing:0;font-weight:400;font-family:inherit}
+      .tipbox{position:fixed;z-index:10;max-width:280px;background:var(--sh-surface, var(--card-background-color, #FFFFFF));color:${text};border:1px solid ${border};font-size:13px;line-height:1.4;padding:10px 12px;border-radius:10px;box-shadow:var(--sh-overlay-shadow, 0 8px 24px rgba(0,0,0,.14));pointer-events:none;opacity:0;transition:opacity .12s;text-transform:none;letter-spacing:0;font-weight:400;font-family:inherit}
       .tipbox.show{opacity:1}
       table{width:100%;border-collapse:collapse;font-size:13px;font-variant-numeric:tabular-nums;margin-top:8px}
-      th{font-family:var(--pv-mono);font-size:10.5px;font-weight:500;color:${text3};text-transform:uppercase;letter-spacing:.07em;text-align:right;padding:0 0 6px 10px}
+      th{font-size:11px;font-weight:500;color:${text3};text-transform:uppercase;letter-spacing:.04em;text-align:right;padding:0 0 6px 10px}
       th:first-child,td:first-child{text-align:left;padding-left:0}
       td{padding:8px 0 8px 10px;border-top:1px solid ${border};text-align:right;color:${text};white-space:nowrap}
       td:first-child{white-space:normal}
@@ -294,21 +291,26 @@ class PiVitalsCard extends HTMLElement {
       .pill{display:inline-flex;align-items:center;gap:6px;height:22px;box-sizing:border-box;padding:0 8px;border-radius:999px;background:${fill};font-size:12px;font-weight:500;color:${text2};vertical-align:middle;white-space:nowrap}
       .pill::before{content:"";flex:none;width:6px;height:6px;border-radius:50%;background:var(--sh-neutral, #A1A1A6)}
       .on::before{background:var(--sh-ok, #1F9D45)}.off::before{background:var(--sh-neutral, #A1A1A6)}.upd::before{background:var(--sh-warn, #D97706)}.bad::before{background:var(--sh-bad, #E5302A)}
-      .pv{display:inline-block;min-width:44px;box-sizing:border-box;text-align:center;font-family:var(--pv-mono);font-size:11.5px;font-weight:500;padding:3px 7px;border-radius:999px;background:${fill}}
+      .pv{display:inline-block;min-width:44px;box-sizing:border-box;text-align:center;font-size:12px;font-weight:500;padding:3px 7px;border-radius:999px;background:${fill}}
       .kv{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin-top:8px}
-      .kv .num b{font-size:19px}
+      .kv .num b{font-size:22px}
+      .setup{display:flex;gap:10px;align-items:flex-start;border:1px solid color-mix(in srgb, var(--sh-warn, #D97706) 35%, transparent);background:color-mix(in srgb, var(--sh-warn, #D97706) 7%, transparent);border-radius:10px;padding:10px 12px;font-size:13px;line-height:1.45}
+      .setup ha-icon{--mdc-icon-size:18px;color:var(--sh-warn, #D97706);flex:none;margin-top:1px}
+      .setup b{font-weight:600}
+      .setup a{color:var(--sh-accent, #0071E3);cursor:pointer;text-decoration:none;font-weight:500;white-space:nowrap}
       details.more{border-top:1px solid ${border};padding-top:12px}
-      details.more summary{list-style:none;cursor:pointer;display:flex;align-items:center;gap:8px;font-size:13px;color:${text2};user-select:none}
+      details.more summary{list-style:none;cursor:pointer;display:flex;align-items:center;gap:6px;font-size:13px;color:${text2};user-select:none}
       details.more summary::-webkit-details-marker{display:none}
       details.more summary ha-icon{--mdc-icon-size:18px;transition:transform .2s}
       details.more[open] summary ha-icon{transform:rotate(90deg)}
-      details.more summary b{color:${text};font-weight:600}
+      details.more summary b{color:${text};font-weight:600;margin-right:4px}
       details.more .grid3{margin-top:12px}
-      @container verdict (max-width:560px){.checks{grid-template-columns:1fr}}
+      @container card (max-width:940px){.facts2{grid-template-columns:repeat(2,minmax(0,1fr))}}
       @container card (max-width:860px){.grid3{grid-template-columns:1fr}.sparks{grid-template-columns:repeat(3,minmax(0,1fr))}.facts{grid-template-columns:repeat(2,minmax(0,1fr))}}
-      @container card (max-width:700px){.hero{grid-template-columns:1fr}.board svg{max-width:260px}}
-      @container card (max-width:520px){.apps td:first-child .sub,.apps .pt,.blurb{display:none}.apps .pill{padding:0 6px;gap:0}.apps td,.apps th{padding-left:6px}.apps td{font-size:12px}.sparks{grid-template-columns:repeat(2,minmax(0,1fr))}.gauges{grid-template-columns:repeat(3,minmax(0,1fr))}}
-    </style><ha-card><div class="hero"><div class="board"></div><div class="verdict"></div></div><div class="body"></div><div class="tipbox"></div></ha-card>`;
+      @container card (max-width:640px){.hero{grid-template-columns:1fr}.board svg{max-width:240px}.rings{grid-template-columns:repeat(2,minmax(0,1fr))}}
+      @container card (max-width:520px){.sparks{grid-template-columns:repeat(2,minmax(0,1fr))}.apps td:first-child .sub,.apps .pt,.blurb{display:none}.apps .pill{padding:0 6px;gap:0}
+        .apps td,.apps th{padding-left:6px}.apps td{font-size:12px}.upt{visibility:hidden}.ring{gap:8px}.ring svg{width:50px;height:50px}.num b{font-size:24px}}
+    </style><ha-card><div class="head"></div><div class="hero"><div class="board"></div><div class="facts2"></div></div><div class="body"></div><div class="tipbox"></div></ha-card>`;
     this.wireTips();
     const open = el => {
       const [id, title, color, decimals, range] = el.dataset.detail.split("|");
@@ -321,23 +323,41 @@ class PiVitalsCard extends HTMLElement {
       const g = e.target.closest("[data-detail]"); if (g && !e.target.closest("[data-tip]")) open(g);
     });
     this.shadowRoot.addEventListener("keydown", e => { const g = e.target.closest?.("[data-detail]"); if (g && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); open(g); } });
+    // sparkline scrub: same cursor line, dot and tooltip as the expanded charts (hover with a mouse, drag with a finger)
+    const R0 = this.shadowRoot, svAt = e => e.target.closest?.(".sv");
+    const move = e => { const sv = svAt(e); if (!sv || (e.pointerType !== "mouse" && !this.sDown)) return; const rc = sv.getBoundingClientRect(); this.sh = { id: sv.dataset.id, f: Math.max(0, Math.min(1, (e.clientX - rc.left) / rc.width)) }; this.scrubSpark(); };
+    R0.addEventListener("pointermove", move);
+    R0.addEventListener("pointerdown", e => { if (svAt(e) && e.pointerType !== "mouse") { this.sDown = true; move(e); } });
+    const end = () => { this.sDown = false; this.sh = null; this.scrubSpark(); };
+    R0.addEventListener("pointerup", e => { if (e.pointerType !== "mouse") end(); });
+    R0.addEventListener("pointercancel", end);
+    R0.addEventListener("pointerout", e => { if (e.pointerType === "mouse" && svAt(e) && !svAt({ target: e.relatedTarget || R0.host })) end(); });
   }
-  // 270° gauge with a tick ring; gap at the bottom
-  gauge(pct, color) {
-    const r = 34, cx = 48, cy = 48, c = 2 * Math.PI * r, arc = c * 0.75, p = Math.max(0, Math.min(100, pct ?? 0)) / 100;
-    let ticks = "";
-    for (let i = 0; i <= 10; i++) {
-      const a = (135 + 27 * i) * Math.PI / 180, maj = i % 5 === 0, r1 = 40.5, r2 = maj ? 45 : 43.5;
-      ticks += `<line class="tick${maj ? " maj" : ""}" x1="${(cx + r1 * Math.cos(a)).toFixed(1)}" y1="${(cy + r1 * Math.sin(a)).toFixed(1)}" x2="${(cx + r2 * Math.cos(a)).toFixed(1)}" y2="${(cy + r2 * Math.sin(a)).toFixed(1)}"/>`;
-    }
-    return `<svg viewBox="0 0 96 96"><g transform="rotate(135 ${cx} ${cy})"><circle class="trk" cx="${cx}" cy="${cy}" r="${r}" stroke-dasharray="${arc.toFixed(1)} ${c.toFixed(1)}"/>
-      <circle class="val" cx="${cx}" cy="${cy}" r="${r}" style="stroke:${color}" stroke-dasharray="${(arc * p).toFixed(1)} ${c.toFixed(1)}"/></g>${ticks}</svg>`;
+  ring(pct, color) {
+    const r = 24, c = 2 * Math.PI * r, p = Math.max(0, Math.min(100, pct ?? 0));
+    return `<svg viewBox="0 0 58 58"><circle class="trk" cx="29" cy="29" r="${r}"/><circle class="val" cx="29" cy="29" r="${r}" style="stroke:${color}" stroke-dasharray="${c}" stroke-dashoffset="${c * (1 - p / 100)}"/></svg>`;
+  }
+  scrubSpark() {
+    for (const sv of this.shadowRoot.querySelectorAll(".sv.on")) if (sv.dataset.id !== this.sh?.id) sv.classList.remove("on");
+    const sv = this.sh && this.shadowRoot.querySelector(`.sv[data-id="${this.sh.id}"]`), g = sv && this.sg?.[this.sh.id];
+    if (!sv || !g?.pts.length) return;
+    const t = g.t0 + this.sh.f * PV_WINDOW;
+    let p = null; for (const q of g.pts) { if (q[0] <= t) p = q; else break; }
+    if (!p) { sv.classList.remove("on"); return; }
+    const left = this.sh.f * 100 + "%", tip = sv.querySelector(".stip");
+    sv.querySelector(".scur").style.left = left;
+    Object.assign(sv.querySelector(".sdot").style, { left, top: (g.y(p[1]) / g.H * 100) + "%", background: sv.dataset.c });
+    tip.innerHTML = `<b>${g.fmt(p[1])}</b><span> ${g.unit(p[1])}</span><div>${new Date(p[0]).toLocaleTimeString([], { hour: "numeric", minute: "2-digit", second: "2-digit" })}</div>`;
+    sv.classList.add("on");
+    const w = tip.offsetWidth, W = sv.offsetWidth;
+    tip.style.left = Math.max(-12, Math.min(W - w + 12, this.sh.f * W - w / 2)) + "px";
   }
   spark(id, color) {
-    const pts = this.buf[id] || [], now = Date.now(), t0 = now - PV_WINDOW, W = 200, H = 40;
+    const pts = this.buf[id] || [], now = Date.now(), t0 = now - PV_WINDOW, W = 200, H = 44;
     if (!pts.length) return `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none"></svg>`;
     const vals = pts.map(p => p[1]), lo = Math.min(...vals), hi = Math.max(...vals), pad = (hi - lo) * 0.15 || Math.max(Math.abs(hi) * 0.05, 0.5);
     const y = v => H - 2 - ((v - (lo - pad)) / ((hi + pad) - (lo - pad))) * (H - 4), x = t => Math.max(0, (t - t0) / PV_WINDOW) * W;
+    (this.sg ||= {})[id] = { pts, t0, y, H, fmt: this.sfmt[id], unit: this.sunit[id] };
     let d = "", last = null;
     for (const [t, v] of pts) { const X = x(t).toFixed(1), Y = y(v).toFixed(1); d += d ? `H${X}V${Y}` : `M${X} ${Y}`; last = Y; }
     d += `H${W}`;
@@ -348,31 +368,31 @@ class PiVitalsCard extends HTMLElement {
   }
   // Pi 5 line drawing (85 × 56 mm at 2 px/mm). Parts carry live state; redrawn only when that state changes.
   board(s) {
-    const C = this.C, arcs = [[6, 1], [10, 2], [14, 3]];
-    const wifi = s.wifi == null ? "" : `<g data-tip="b_wifi" transform="translate(28 50)">${arcs.map(([r, i]) =>
-      `<path d="M${-r * .7} ${-r * .7}A${r} ${r} 0 0 1 ${r * .7} ${-r * .7}" fill="none" stroke-width="2" stroke-linecap="round" style="stroke:${i <= s.wifi ? C.accent : C.text3};opacity:${i <= s.wifi ? 1 : .35}"/>`).join("")}
-      <circle r="1.8" style="fill:${s.wifi ? C.accent : C.text3}"/><rect x="-16" y="-16" width="32" height="20" fill="transparent"/></g>`;
-    const pins = Array.from({ length: 20 }, (_, i) => `<rect class="pin" x="${17 + i * 5}" y="4.5" width="2.4" height="2.4"/><rect class="pin" x="${17 + i * 5}" y="9.5" width="2.4" height="2.4"/>`).join("");
-    const fan = s.fan == null ? "" : `<g data-tip="b_fan"><circle class="ln" cx="68" cy="58" r="27" stroke-dasharray="2 3"/>
-      <g class="fan${s.fan ? "" : " off"}" style="--d:${s.fanDur}s">${Array.from({ length: 7 }, (_, i) =>
-        `<path d="M68 58 q 4 -12 0 -22" class="ln" transform="rotate(${i * 360 / 7} 68 58)" style="stroke:${s.fan ? C.accent : C.text3};opacity:.7"/>`).join("")}</g></g>`;
-    return `<svg viewBox="-10 -6 196 126" role="img" aria-label="Raspberry Pi board status">
-      <rect class="pcb" x="0" y="0" width="170" height="112" rx="7"/>
-      ${[[7, 7], [123, 7], [7, 105], [123, 105]].map(([x, y]) => `<circle class="ln" cx="${x}" cy="${y}" r="3.2"/>`).join("")}
-      <rect class="ln" x="14" y="2" width="102" height="12" rx="1.5"/>${pins}
-      <rect class="pt" x="150" y="5" width="30" height="27" rx="2"/><text class="lbl" x="165" y="21" text-anchor="middle">ETH</text>
-      <rect class="pt" x="152" y="40" width="28" height="26" rx="2"/><rect class="pt" x="152" y="73" width="28" height="26" rx="2"/>
-      <text class="lbl" x="166" y="56" text-anchor="middle">USB</text><text class="lbl" x="166" y="89" text-anchor="middle">USB</text>
-      <rect class="pt" x="14" y="104" width="16" height="11" rx="4"/><rect class="pt" x="44" y="106" width="13" height="8" rx="1.5"/><rect class="pt" x="66" y="106" width="13" height="8" rx="1.5"/>
-      <g data-tip="b_sd"><rect class="sd${s.sd ? " on" : ""}" x="-8" y="44" width="11" height="24" rx="2" fill="none" stroke-width="1.4" stroke-dasharray="${s.sd ? "none" : "2 2"}" style="stroke:${s.sd ? C.accent : C.text3}"/>
-        <text class="lbl" x="-2.5" y="77" text-anchor="middle">SD</text></g>
-      <g data-tip="b_led"><circle class="led" cx="10" cy="92" r="2.8" style="fill:${s.led};color:${s.led}"/><text class="lbl" x="16" y="94.5">PWR</text></g>
+    const C = this.C, cx = 66, cy = 58;
+    const wifi = s.wifi == null ? "" : `<g data-tip="b_wifi" transform="translate(28 36)">${[[4, 1], [7, 2], [10, 3]].map(([r, i]) =>
+      `<path d="M${(-r * .72).toFixed(2)} ${(-r * .69).toFixed(2)}A${r} ${r} 0 0 1 ${(r * .72).toFixed(2)} ${(-r * .69).toFixed(2)}" fill="none" stroke-width="1.4" stroke-linecap="round" style="stroke:${i <= s.wifi ? C.accent : C.text3};opacity:${i <= s.wifi ? 1 : .35}"/>`).join("")}
+      <circle r="1.3" style="fill:${s.wifi ? C.accent : C.text3}"/><rect x="-11" y="-11" width="22" height="13" fill="transparent"/></g>`;
+    const pins = Array.from({ length: 20 }, (_, i) => `<circle class="pin" cx="${(19.5 + i * 4.85).toFixed(2)}" cy="4.9" r=".95"/><circle class="pin" cx="${(19.5 + i * 4.85).toFixed(2)}" cy="8.3" r=".95"/>`).join("");
+    const blades = Array.from({ length: 9 }, (_, i) => `<path d="M${cx + 7} ${cy}Q${cx + 14} ${cy - 5} ${cx + 19.5} ${cy - 1.5}" transform="rotate(${i * 40} ${cx} ${cy})"/>`).join("");
+    const fan = s.fan == null ? "" : `<g data-tip="b_fan"><circle class="ln" cx="${cx}" cy="${cy}" r="22"/>
+      <g class="fan${s.fan ? "" : " off"}" style="--d:${s.fanDur}s" fill="none" stroke-width=".9" stroke-linecap="round"><g style="stroke:${s.fan ? C.accent : C.text3};opacity:${s.fan ? .55 : .4}">${blades}</g></g></g>`;
+    return `<svg viewBox="-8 -2 192 124" role="img" aria-label="Raspberry Pi board status">
+      <rect class="pcb" x="0" y="0" width="170" height="112" rx="6"/>
+      ${[[7, 7], [123, 7], [7, 105], [123, 105]].map(([x, y]) => `<circle class="ln" cx="${x}" cy="${y}" r="2.6"/>`).join("")}
+      <rect class="pt" x="15" y="2" width="100" height="9.4" rx="1.5"/>${pins}
+      <rect class="pt" x="146" y="4" width="30" height="25" rx="2"/><text class="lbl" x="161" y="18.5" text-anchor="middle">ETH</text>
+      <rect class="pt" x="149" y="37" width="27" height="26" rx="2"/><text class="lbl" x="162.5" y="52" text-anchor="middle">USB</text>
+      <rect class="pt" x="149" y="71" width="27" height="26" rx="2"/><text class="lbl" x="162.5" y="86" text-anchor="middle">USB</text>
+      <rect class="pt" x="12" y="106" width="15" height="9" rx="4"/><rect class="pt" x="36" y="107" width="11" height="7" rx="1.5"/><rect class="pt" x="54" y="107" width="11" height="7" rx="1.5"/>
+      <g data-tip="b_sd"><rect class="sd${s.sd ? " on" : ""}" x="-5" y="46" width="9" height="20" rx="1.5" stroke-width="1" style="fill:var(--sh-surface, #fff);stroke:${s.sd ? C.accent : C.text3}"/>
+        <text class="lbl" x="7.5" y="58" style="${s.sd ? `fill:${C.accent}` : ""}">SD</text></g>
+      <g data-tip="b_led"><circle cx="10" cy="93" r="2.3" style="fill:${s.led};filter:drop-shadow(0 0 1.5px ${s.led})"/><text class="lbl" x="15" y="95">PWR</text></g>
       ${wifi}
-      <rect class="pt" x="94" y="44" width="20" height="26" rx="2"/><text class="lbl" x="104" y="80" text-anchor="middle">RAM</text>
-      <rect class="pt" x="124" y="48" width="16" height="16" rx="1.5"/><text class="lbl" x="132" y="74" text-anchor="middle">RP1</text>
       ${fan}
-      <g data-tip="b_soc"><rect x="53" y="43" width="30" height="30" rx="3" stroke-width="1.6" style="fill:color-mix(in srgb, ${s.soc} 16%, var(--sh-surface, #fff));stroke:${s.soc}"/>
-        <text class="lbl" x="68" y="60.5" text-anchor="middle" style="fill:${s.soc}">${s.chip}</text></g>
+      <g data-tip="b_soc"><rect x="${cx - 12}" y="${cy - 12}" width="24" height="24" rx="3" stroke-width="1.3" style="fill:color-mix(in srgb, ${s.soc} 16%, var(--sh-surface, #fff));stroke:${s.soc}"/>
+        <text class="lbl" x="${cx}" y="${cy + 2}" text-anchor="middle" style="fill:${s.soc}">${s.chip}</text></g>
+      <rect class="pt" x="96" y="46" width="18" height="24" rx="1.5"/><text class="lbl" x="105" y="78" text-anchor="middle">RAM</text>
+      <rect class="pt" x="124" y="51" width="14" height="14" rx="1.5"/><text class="lbl" x="131" y="73" text-anchor="middle">RP1</text>
     </svg>`;
   }
   render() {
@@ -426,47 +446,47 @@ class PiVitalsCard extends HTMLElement {
     const vColor = noData ? C.neutral : [C.ok, C.warn, C.bad][worst];
 
     // board, redrawn only when its state changes
-    const bs = { soc: tempColor, chip: /Pi 5/.test(model) ? "BCM2712" : /Pi 4/.test(model) ? "BCM2711" : "SoC", fan: fan == null ? null : fan > 0, fanDur: fan ? Math.max(0.25, Math.round(2400 / fan * 4) / 4) : 1,
+    const bs = { soc: tempColor, chip: /Pi 5/.test(model) ? "2712" : /Pi 4/.test(model) ? "2711" : "SoC", fan: fan == null ? null : fan > 0, fanDur: fan ? Math.max(0.25, Math.round(2400 / fan * 4) / 4) : 1,
       led: uvNow ? C.bad : C.ok, wifi: wifiBars, sd: (VA.disk_write_kbs ?? 0) > 50 && /^mmcblk/.test(VA.disk_device || "") };
     const bsig = JSON.stringify(bs);
     const boardEl = this.shadowRoot.querySelector(".board");
     boardEl.hidden = !isPi; this.shadowRoot.querySelector(".hero").classList.toggle("solo", !isPi);
     if (isPi && bsig !== this.boardSig) { this.boardSig = bsig; boardEl.innerHTML = this.board(bs); }
 
-    // checklist rows
-    const dot = c => `<i style="background:${c}"></i>`;
-    const checks = [];
-    if (watts != null || ps) checks.push([uvNow ? C.bad : uvBoot ? C.warn : C.ok, "Power", `${uvNow ? "Under-voltage now" : uvBoot ? "Dipped since boot" : "Stable since boot"}${watts != null ? ` <span>· ${watts.toFixed(2)} W</span>` : ""}`, "uv"]);
-    if (thr) checks.push([slowNow ? C.bad : slowBoot ? C.warn : C.ok, "Throttling", `${slowNow ? "Active now" : slowBoot ? "Earlier since boot" : "None since boot"}${VA.arm_mhz ? ` <span>· ${VA.arm_mhz.toLocaleString()} MHz</span>` : ""}`, "throttle"]);
-    if (disk != null) checks.push([busy(disk, 80, 90) || C.ok, "Storage", `${devKind(VA.disk_device) || "Disk"} · ${Math.round(disk)}% used${VA.db_mb ? ` <span>· DB ${VA.db_mb >= 1000 ? (VA.db_mb / 1000).toFixed(1) + " GB" : Math.round(VA.db_mb) + " MB"}</span>` : ""}`, "storage"]);
-    if (H[bLast]) checks.push([backupAgeD == null ? C.neutral : backupAgeD > cfg.backup_stale_days ? C.warn : C.ok, "Backups", `${ago(bLast) || "None yet"}${ago(bNext) ? ` <span>· next ${ago(bNext)}</span>` : ""}`, "backup"]);
-    checks.push([pendingU.length ? C.warn : C.ok, "Updates", pendingU.length ? `${pendingU.length} available <span>· ${pendingU.slice(0, 2).map(u => (u.attributes.friendly_name || "").replace(/ update$/i, "")).join(", ")}${pendingU.length > 2 ? "…" : ""}</span>` : `All current <span>· ${updates.length} tracked</span>`, "updates"]);
-    if (wired) checks.push([C.ok, "Network", `Ethernet <span>· ${ifc}</span>`, "net"]);
-    else if (dbm != null) checks.push([dbm > -67 ? C.ok : dbm > -75 ? C.warn : C.bad, "Wi-Fi", `${dbm > -60 ? "Excellent" : dbm > -70 ? "Good" : dbm > -75 ? "Fair" : "Weak"} <span>· ${dbm} dBm</span>`, "wifi"]);
-
-    this.shadowRoot.querySelector(".verdict").innerHTML = `
-      <div class="vhead"><span class="model">${model}</span><span class="upt">${up ? "UP " + up.toUpperCase() : ""}</span></div>
-      <div class="vtitle" style="color:${vColor}"><i style="background:${vColor}"></i><span style="color:var(--sh-text, var(--primary-text-color))">${verdict}</span>${this.tip("status")}</div>
-      <div class="checks">${checks.map(([c, k, val, t]) => `<div class="check">${dot(c)}<span class="ck">${k}</span><span class="cv">${val}</span>${this.tip(t)}</div>`).join("")}</div>`;
+    // header (model, uptime, verdict pill) and the status facts beside the board
+    const fx = [];
+    if (watts != null || ps) fx.push([uvNow ? C.bad : uvBoot ? C.warn : C.ok, "Power", uvNow ? "Under-voltage now" : uvBoot ? "Dipped since boot" : "Stable since boot", watts != null ? `${watts.toFixed(2)} W board` : "Supply checker", "uv"]);
+    if (thr) fx.push([slowNow ? C.bad : slowBoot ? C.warn : C.ok, "Throttling", slowNow ? "Active now" : slowBoot ? "Earlier since boot" : "None since boot", VA.arm_mhz ? `CPU at ${VA.arm_mhz.toLocaleString()} MHz` : "", "throttle"]);
+    if (disk != null) fx.push([busy(disk, 80, 90) || C.ok, "Storage", `${Math.round(disk)}% used`, [devKind(VA.disk_device), VA.db_mb ? `DB ${VA.db_mb >= 1000 ? (VA.db_mb / 1000).toFixed(1) + " GB" : Math.round(VA.db_mb) + " MB"}` : ""].filter(Boolean).join(" · "), "storage"]);
+    if (H[bLast]) fx.push([backupAgeD == null ? C.neutral : backupAgeD > cfg.backup_stale_days ? C.warn : C.ok, "Backups", ago(bLast) || "None yet", ago(bNext) ? `Next ${ago(bNext)}` : "", "backup"]);
+    fx.push([pendingU.length ? C.warn : C.ok, "Updates", pendingU.length ? `${pendingU.length} available` : "All current", pendingU.length ? pendingU.map(u => (u.attributes.friendly_name || "").replace(/ update$/i, "")).join(", ") : `${updates.length} tracked`, "updates"]);
+    if (wired) fx.push([C.ok, "Network", "Ethernet", ifc, "net"]);
+    else if (dbm != null) fx.push([dbm > -67 ? C.ok : dbm > -75 ? C.warn : C.bad, "Wi-Fi", dbm > -60 ? "Excellent" : dbm > -70 ? "Good" : dbm > -75 ? "Fair" : "Weak", `${String(dbm).replace("-", "−")} dBm`, "wifi"]);
+    this.shadowRoot.querySelector(".head").innerHTML = `<ha-icon icon="${isPi ? "mdi:raspberry-pi" : "mdi:server"}"></ha-icon><span class="title">${model}</span>
+      <span class="upt">${up ? "· up " + up : ""}</span><span class="status"><i style="background:${vColor}"></i>${verdict}${this.tip("status")}</span>`;
+    this.shadowRoot.querySelector(".facts2").innerHTML = fx.map(([c, k, val, sub, t]) =>
+      `<div class="fx"><div class="k"><i style="background:${c}"></i>${k} ${this.tip(t)}</div><div class="val">${val}</div><div class="sub" title="${sub}">${sub || "&nbsp;"}</div></div>`).join("");
 
     // gauges
     const gauges = [
-      ["CPU", "cpu", cpu == null ? "—" : Math.round(cpu), "%", cpu, busy(cpu, 60, 85) || C.accent, cpu == null ? "" : `${l1 != null ? `load ${l1} · ` : ""}${cores} cores`, `${this.S("processor_use")}|CPU|infra|0|6H`],
+      ["CPU", "cpu", cpu == null ? "—" : Math.round(cpu), "%", cpu, busy(cpu, 60, 85) || C.accent, l1 != null ? `load ${l1.toFixed(2)}` : `${cores} cores`, `${this.S("processor_use")}|CPU|infra|0|6H`],
       ["Memory", "mem", mem == null ? "—" : Math.round(mem), "%", mem, busy(mem, 70, 90) || C.accent, memTot ? `${gb(memUse)} of ${gb(memTot)} GB` : "", `${this.S("memory_usage")}|Memory|infra|0|6H`],
       ["Disk", "disk", disk == null ? "—" : Math.round(disk), "%", disk, busy(disk, 75, 90) || C.accent, dTot ? `${dUse.toFixed(1)} of ${dTot.toFixed(0)} GB` : "", `${this.S("disk_usage")}|Disk|infra|1|7D`],
       ["Temp", "temp", tC == null ? "—" : tTxt(tC), tU, tC == null ? 0 : tC / 85 * 100, tempColor, tC == null ? "" : `${isF ? tC.toFixed(1) + " °C · " : ""}${fan != null ? (fan ? Math.round(fan).toLocaleString() + " rpm" : "fan idle") : ""}`.replace(/ · $/, ""), `${this.S("processor_temperature")}|CPU temperature|climate|1|1H`],
     ];
-    if (watts != null) gauges.push(["Power", "power_g", watts.toFixed(2), "W", watts / cfg.power_max_w * 100, C.accent, "board · USB excluded", `${R.vitals}|Pi board power|infra|2|6H`]);
-    const gaugesHtml = gauges.filter(g => H[g[7].split("|")[0]]).map(([name, t, val, u, pct, col, sub, det]) => `<div class="gauge" data-detail="${det}" role="button" tabindex="0" aria-label="Open ${name} history">
-      <div class="g">${this.gauge(pct, col)}<div class="gv"><b>${val}</b><span>${u}</span></div></div>
-      <div class="k">${name} ${this.tip(t)}</div><div class="sub">${sub}</div></div>`).join("");
+    const gaugesHtml = gauges.filter(g => H[g[7].split("|")[0]]).map(([name, t, val, u, pct, col, sub, det]) => `<div class="ring" data-detail="${det}" role="button" tabindex="0" aria-label="Open ${name} history">${this.ring(pct, col)}
+      <div><div class="k">${name} ${this.tip(t)}</div><div class="num"><b>${val}</b><span>${u}</span></div><div class="sub">${sub}</div></div></div>`).join("");
 
     // sparks
     const fmt = (x, u) => x == null ? "—" : u === "MB/s" ? (x < 1 ? (x * 1000).toFixed(0) : x.toFixed(1)) : u === "W" ? x.toFixed(2) : /°/.test(u) ? x.toFixed(0) : u === "" ? x.toFixed(2) : Math.round(x);
     const unit = (x, u) => u === "MB/s" ? (x != null && x < 1 ? "KB/s" : "MB/s") : u;
-    const sparks = this.sparkDefs().map(([key, id, name, u]) => { const x = this.n(id), col = key === "temp" ? C.climate : C.accent; return `<div class="spark">
-      <div class="lbl">${name}${key === "down" ? " " + this.tip("net") : ""}</div>
-      <div class="num"><b>${fmt(x, u)}</b><span>${unit(x, u)}</span></div>${this.spark(id, col)}</div>`; }).join("");
+    this.sfmt = {}; this.sunit = {};
+    const sparks = this.sparkDefs().map(([key, id, name, u]) => {
+      const x = this.n(id), col = key === "temp" ? C.climate : C.accent;
+      this.sfmt[id] = y => fmt(y, u); this.sunit[id] = y => unit(y, u);
+      return `<div class="spark"><div class="lbl"><i style="background:${col}"></i>${name}${key === "down" ? " " + this.tip("net") : ""}</div>
+      <div class="num"><b>${fmt(x, u)}</b><span>${unit(x, u)}</span></div>
+      <div class="sv" data-id="${id}" data-c="${col}">${this.spark(id, col)}<div class="scur"></div><div class="sdot"></div><div class="stip"></div></div></div>`; }).join("");
 
     // storage panel
     const sz = mib => mib == null ? "—" : mib >= 1024 ? (mib / 1024).toFixed(2) + " GB" : Math.round(mib) + " MB";
@@ -477,7 +497,8 @@ class PiVitalsCard extends HTMLElement {
         <div class="bar"><span style="width:${disk ?? 0}%;background:${busy(disk, 80, 90) || C.accent}"></span></div></div>
       <div class="kvs" style="margin-top:10px">
         ${VA.db_mb != null ? kvr("Database", `${mb(VA.db_mb)} <span class="x">· ${VA.db_mb_per_day != null ? (VA.db_mb_per_day >= 0 ? "+" : "") + VA.db_mb_per_day + " MB/day" : "growth after 1 day"}</span>`, "db") : ""}
-        ${VA.disk_written_gb != null ? kvr("Written since boot", `${VA.disk_written_gb} GB${VA.disk_write_kbs != null ? ` <span class="x">· ${VA.disk_write_kbs} kB/s now</span>` : ""}`, "writes") : ""}
+        ${VA.disk_written_gb != null ? kvr("Written since boot", `${VA.disk_written_gb} GB`, "writes") : ""}
+        ${VA.disk_write_kbs != null ? kvr("Writing now", `${VA.disk_write_kbs} kB/s`) : ""}
         ${kvr("Swap", `${swapUse != null ? Math.round(swapUse) : "—"} MB <span class="x">· ${swap ?? "—"}%</span>`, "swap")}
       </div></div>`;
     // power & performance panel
@@ -489,7 +510,7 @@ class PiVitalsCard extends HTMLElement {
       ${thr ? kvr("Throttling now", flagPills(tNow, "bad"), "throttle") + kvr("Since boot", flagPills(tBoot, "upd"), "throttle") : ""}
       ${!thr && ps ? kvr("Power supply", ps === "on" ? `<span class="pill bad">Under-voltage</span>` : `<span class="pill on">OK</span>`, "uv") : ""}
       ${fan != null ? kvr("Fan", fan ? `${Math.round(fan).toLocaleString()} rpm <span class="x">· ${Math.round(fan / cfg.fan_max_rpm * 100)}%</span>` : "Idle", "fan") : ""}
-      ${!wired && dbm != null ? kvr("Wi-Fi signal", `${dbm} dBm`, "wifi") : ""}
+      ${!wired && dbm != null ? kvr("Wi-Fi signal", `${String(dbm).replace("-", "−")} dBm`, "wifi") : ""}
     </div></div>`;
     // backups & updates panel
     const care = `<div class="panel"><div class="k">Backups & updates</div><div class="kvs">
@@ -554,7 +575,7 @@ class PiVitalsCard extends HTMLElement {
       </div>
       <div class="facts">
         <div class="fact"><div class="k">Uptime ${this.tip("uptime")}</div><div class="val">${up || "—"} <span class="sub">· booted ${boot ? new Date(boot).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) : "—"}</span></div></div>
-        <div class="fact"><div class="k">Local IP ${this.tip("ip")}</div><div class="val mono">${ipv4 ?? "—"} <span class="sub">${ifc}</span></div></div>
+        <div class="fact"><div class="k">Local IP ${this.tip("ip")}</div><div class="val">${ipv4 ?? "—"} <span class="sub">${ifc}</span></div></div>
         <div class="fact"><div class="k">Home Assistant ${this.tip("ha_stats")}</div><div class="val">${Object.keys(H).length.toLocaleString()} entities <span class="sub">· ${count("automation")} automations · ${count("script")} scripts</span></div></div>
         <div class="fact"><div class="k">Platform ${this.tip("ha")}</div><div class="val">${R.sys.os ? `OS ${stateOf(R.sys.os.version) ?? "—"} · ` : ""}<span class="sub">Core ${ver(R.sys.core?.update)}${VA.model ? " · " + VA.model : ""}</span></div></div>
       </div>
@@ -563,12 +584,13 @@ class PiVitalsCard extends HTMLElement {
 
     const body = this.shadowRoot.querySelector(".body");
     body.innerHTML = `${setup}
-      <div class="gauges">${gaugesHtml}</div>
+      <div class="rings">${gaugesHtml}</div>
       <div class="panel"><div class="k live-k"><span class="pulse"></span>Live · last 10 minutes ${this.tip("live")}</div><div class="sparks">${sparks}</div></div>
       <div class="grid3">${storage}${perf}${care}</div>
       ${appsHtml}
       ${more}`;
     if (this.tipEl) { const el = this.shadowRoot.querySelector(`[data-tip="${this.tipEl.dataset.tip}"]`); if (el) this.tipEl = el; }
+    if (this.sh) this.scrubSpark();
   }
   dur(ms) {
     const m = Math.floor(ms / 60000), d = Math.floor(m / 1440), h = Math.floor((m % 1440) / 60);
