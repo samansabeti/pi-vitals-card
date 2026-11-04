@@ -12,6 +12,7 @@ A Raspberry Pi health dashboard for Home Assistant, in a single card. It's built
 - **Power & performance.** Throttle flags (now and since boot), measured CPU clock, fan speed, Wi-Fi signal.
 - **Backups, updates and apps.** Only pending updates are listed, plus each app's CPU and RAM.
 - **More details** (collapsed): RAM and swap, load average, stall pressure, network counters, platform versions.
+- **Settings** (the sliders button in the header): °F or °C, show or hide the ⓘ explanations, show or hide the Apps table. Saved to each person's Home Assistant profile, so they follow you to every device.
 
 Every number has an ⓘ tooltip in plain English. Sensors are found by what they are, not by entity ID, so it works on installs in any language. If System Monitor is missing or some of its sensors are off, the card says which ones and links to the page where you turn them on. The layout adapts to the card's width, from phone to widescreen. Light and dark mode follow your theme. No dependencies, no build step, one file.
 
@@ -72,11 +73,12 @@ All optional.
 | `power_status_entity` | auto (Raspberry Pi Power Supply Checker) | Under-voltage sensor |
 | `cores` | `4` | Used for load % |
 | `fan_max_rpm` | `8000` | Fan % scale (Pi 5 Active Cooler) |
-| `temp_warn_c` / `temp_bad_c` | `65` / `80` | Temperature thresholds, °C (works with °F sensors too) |
+| `temp_warn_c` / `temp_bad_c` | `65` / `80` | Temperature thresholds in °C, whatever unit the card shows |
 | `backup_stale_days` | `3` | Warn when the last backup is older than this |
 | `backup_note` | — | Extra sentence for the backup tooltip ("Also copied to my NAS") |
 | `footer` | — | Small note at the bottom of More details |
-| `show_apps` | `true` | Show the Apps table |
+| `temperature_unit` | your HA unit system | `F` or `C`. Each viewer can still change it in Settings |
+| `show_apps` | `true` | Show the Apps table (each viewer can change it in Settings) |
 
 ### Colors
 

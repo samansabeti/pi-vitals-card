@@ -1,6 +1,6 @@
 // Pi Vitals: one-card health view of the Raspberry Pi running Home Assistant.
 // Line-art board whose parts light up by status, status facts, ring gauges, live sparklines with hover,
-// storage wear, power and throttling, backups and updates, apps, and a collapsed "more details" drawer.
+// storage wear, power and throttling, backups and updates, apps, a collapsed "more details" drawer, and a Settings menu.
 // Reads System Monitor sensors plus the optional pi_vitals.py command_line sensor (power, throttle flags, clock,
 // Wi-Fi signal, SD writes, database growth). Everything optional hides cleanly when its sensor is missing.
 // Sensors are found by integration + translation key, so non-English installs work; `prefix` forces the old English-ID lookup.
@@ -8,7 +8,7 @@
 const PV_VERSION = "1.0.0";
 const PV_DEFAULTS = {
   vitals_entity: "sensor.pi_board_power", power_status_entity: "binary_sensor.raspberry_pi_power_status",
-  cores: 4, fan_max_rpm: 8000, power_max_w: 10, temp_warn_c: 65, temp_bad_c: 80, backup_stale_days: 3,
+  cores: 4, fan_max_rpm: 8000, temp_warn_c: 65, temp_bad_c: 80, backup_stale_days: 3,
 };
 // English System Monitor entity suffixes (what the card was written against) → the integration's translation keys
 const PV_KEYS = {
@@ -25,7 +25,7 @@ const PV_TIPS = {
   cpu: "How busy the processor cores are, averaged. Home Assistant normally idles at 1–5%. Short spikes are normal; sustained 80%+ means something is working hard.",
   mem: "RAM apps actually hold. Linux also uses spare RAM as a disk cache, which it hands back instantly, so that isn't counted. Under 70% is comfortable.",
   disk: "Space used on the boot disk. It holds HA, its history database and backups. Keep it under ~80% so updates and backups have room.",
-  temp: "CPU temperature. A Pi 5 idles around 40–55 °C. The fan ramps from ~50 °C and at 80 °C the firmware slows the chip to cool it ('throttling').",
+  temp: "CPU temperature. A Pi 5 idles around {40-55}. The fan ramps from ~{50}, and at {80} the firmware slows the chip to cool it ('throttling').",
   power_g: "Board power from the PMIC's own rails, every 30 s. It leaves out USB devices and supply losses, so wall draw is a bit higher.",
   live: "Live readings over the last 10 minutes. Lines step when a sensor reports a new value.",
   net: "Data moving over the Pi's network link. Down is arriving, up is sent. HA is chatty but small: a few KB/s is normal; bursts come from updates, backups and cameras.",
@@ -55,6 +55,22 @@ const PV_TIPS = {
   b_wifi: "Wi-Fi signal: three arcs is excellent, one is weak.",
 };
 
+// Settings (gear in the header) are saved per user in Home Assistant's frontend user data, so they follow you to every device.
+// Other cards can follow them: sh-detail-chart's `temperature_unit: pi-vitals` listens for the "pi-vitals-settings" event.
+window.piVitals = window.piVitals || {
+  settings: null,
+  load(hass) {
+    return this.loading ||= hass.callWS({ type: "frontend/get_user_data", key: "pi_vitals" })
+      .then(r => { this.settings = r?.value || {}; }, () => { this.settings = {}; })
+      .then(() => dispatchEvent(new CustomEvent("pi-vitals-settings")));
+  },
+  save(hass, patch) {
+    this.settings = { ...(this.settings || {}), ...patch };
+    dispatchEvent(new CustomEvent("pi-vitals-settings"));
+    return hass.callWS({ type: "frontend/set_user_data", key: "pi_vitals", value: this.settings }).catch(() => {});
+  },
+};
+
 class PiVitalsCard extends HTMLElement {
   static getStubConfig() { return {}; }
   constructor() { super(); this.attachShadow({ mode: "open" }); this.buf = {}; this.seen = {}; this.sig = ""; this.boardSig = ""; this.built = false; }
@@ -64,6 +80,21 @@ class PiVitalsCard extends HTMLElement {
     this.P = this.config.prefix || "sensor.system_monitor_";
     this.R = null;
   }
+  connectedCallback() {
+    this.onSet = () => { this.render(); this.renderMenu(); };
+    this.onDoc = e => { if (this.menuOpen && !e.composedPath().some(n => n.classList?.contains("menu") || n.classList?.contains("gear"))) this.toggleMenu(false); };
+    this.onKey = e => { if (e.key === "Escape" && this.menuOpen) this.toggleMenu(false); };
+    addEventListener("pi-vitals-settings", this.onSet); addEventListener("click", this.onDoc, true); addEventListener("keydown", this.onKey);
+  }
+  disconnectedCallback() { removeEventListener("pi-vitals-settings", this.onSet); removeEventListener("click", this.onDoc, true); removeEventListener("keydown", this.onKey); }
+  // viewer's settings, else the card config, else Home Assistant's unit system
+  settings() {
+    const s = window.piVitals.settings || {}, c = this.config || {};
+    const tu = c.temperature_unit ? String(c.temperature_unit).replace("°", "").toUpperCase() : this._hass?.config?.unit_system?.temperature === "°C" ? "C" : "F";
+    return { temperature_unit: s.temperature_unit || tu, tips: s.tips ?? true, apps: s.apps ?? c.show_apps !== false };
+  }
+  // °C (what thresholds and the tips are written in) to the display unit
+  tC2D(c) { return this.settings().temperature_unit === "F" ? c * 9 / 5 + 32 : c; }
   getCardSize() { return 12; }
   getGridOptions() { return { columns: "full", rows: "auto" }; }
   get C() {
@@ -72,12 +103,14 @@ class PiVitalsCard extends HTMLElement {
       ok: "var(--sh-ok, #1F9D45)", warn: "var(--sh-warn, #D97706)", bad: "var(--sh-bad, #E5302A)", text3: "var(--sh-text-3, var(--secondary-text-color))",
     };
   }
-  tip(key) { return `<span class="i" tabindex="0" data-tip="${key}" aria-label="What is this?"><ha-icon icon="mdi:information-outline"></ha-icon></span>`; }
+  tip(key) { return !this.settings().tips ? "" : ` <span class="i" tabindex="0" data-tip="${key}" aria-label="What is this?"><ha-icon icon="mdi:information-outline"></ha-icon></span>`; }
   wireTips() {
     const r = this.shadowRoot, box = () => r.querySelector(".tipbox");
     const show = el => {
       const b = box(); if (!b) return;
-      b.textContent = (PV_TIPS[el.dataset.tip] || "") + (el.dataset.tip === "backup" && this.config.backup_note ? " " + this.config.backup_note : "");
+      const u = " °" + this.settings().temperature_unit, t = c => Math.round(this.tC2D(c));
+      b.textContent = (PV_TIPS[el.dataset.tip] || "").replace(/\{(\d+)(?:-(\d+))?\}/g, (_, a, z) => t(+a) + (z ? "–" + t(+z) : "") + u)
+        + (el.dataset.tip === "backup" && this.config.backup_note ? " " + this.config.backup_note : "");
       b.classList.add("show");
       const rc = el.getBoundingClientRect(), w = Math.min(280, innerWidth - 24);
       b.style.maxWidth = w + "px";
@@ -163,7 +196,7 @@ class PiVitalsCard extends HTMLElement {
   set hass(h) {
     this._hass = h;
     if (this.modal?.isConnected) this.modal.hass = h;
-    if (!this.built) this.build();
+    if (!this.built) { this.build(); window.piVitals.load(h); }
     this.index(h);
     const defs = this.sparkDefs(), key = defs.map(d => d[1]).join();
     if (key !== this.sparkKey) { this.sparkKey = key; this.seed(defs); }
@@ -193,30 +226,48 @@ class PiVitalsCard extends HTMLElement {
   }
   build() {
     this.built = true;
-    const fill = "var(--sh-fill, rgba(118,118,128,.12))", border = "var(--sh-border, rgba(0,0,0,.08))", text = "var(--sh-text, var(--primary-text-color))",
-      text2 = "var(--sh-text-2, var(--secondary-text-color))", text3 = "var(--sh-text-3, var(--secondary-text-color))";
+    // tokens: Sabeti Home theme (--sh-*) when present, else Home Assistant's own variables
+    const text = "var(--sh-text, var(--primary-text-color))", text2 = "var(--sh-text-2, var(--secondary-text-color))",
+      text3 = "var(--sh-text-3, var(--secondary-text-color))", line = "var(--sh-border, var(--divider-color, rgba(127,127,127,.2)))",
+      fill = "var(--sh-fill, rgba(118,118,128,.12))", raised = "var(--sh-surface-2, rgba(127,127,127,.05))",
+      surface = "var(--sh-surface, var(--card-background-color, #fff))", accent = "var(--pv-accent, var(--sh-infra, #0071E3))",
+      hover = "color-mix(in srgb, var(--sh-text, var(--primary-text-color)) 4%, transparent)";
     this.shadowRoot.innerHTML = `<style>
       :host{display:block}
-      ha-card{container:card/inline-size;padding:16px;font-family:inherit;color:${text};-webkit-font-smoothing:antialiased}
-      .body{display:flex;flex-direction:column;gap:16px;margin-top:16px}
-      .head{display:flex;align-items:center;gap:6px;margin-bottom:14px;min-width:0}.head ha-icon{--mdc-icon-size:18px;color:var(--pv-accent, var(--sh-infra, #0071E3))}
-      .title{font-size:15px;font-weight:600;color:var(--pv-accent, var(--sh-infra, #0071E3));white-space:nowrap}
-      .upt{flex:1;min-width:0;font-size:13px;color:${text2};white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-variant-numeric:tabular-nums}
-      .status{display:inline-flex;align-items:center;gap:6px;height:22px;box-sizing:border-box;padding:0 8px;border-radius:999px;background:${fill};font-size:12px;font-weight:500;color:${text2};white-space:nowrap}
-      .status i{flex:none;width:6px;height:6px;border-radius:50%}
-      .status .i{color:inherit;margin-left:0}
-      .k{font-size:11px;font-weight:500;color:${text3};text-transform:uppercase;letter-spacing:.04em}
-      .num{font-variant-numeric:tabular-nums;line-height:1.1}
-      .num b{font-size:28px;font-weight:600;letter-spacing:-0.02em;color:${text}}.num span{font-size:13px;font-weight:500;color:${text2};margin-left:2px}
-      .sub{font-size:13px;color:${text2};font-variant-numeric:tabular-nums}
+      ha-card{position:relative;container:card/inline-size;padding:16px;font-family:inherit;font-size:13px;line-height:1.4;color:${text};-webkit-font-smoothing:antialiased}
+      button{font:inherit;color:inherit}
+      .body{display:flex;flex-direction:column;gap:12px;margin-top:12px}
+      /* header: icon tile, model and uptime, verdict badge, settings */
+      .head{display:flex;align-items:center;gap:10px;min-width:0;margin-bottom:14px}
+      .tile{flex:none;width:30px;height:30px;border-radius:8px;display:grid;place-items:center;background:color-mix(in srgb, ${accent} 12%, transparent);color:${accent}}
+      .tile ha-icon{--mdc-icon-size:18px}
+      .hl{display:contents}
+      .ttl{flex:1;min-width:0;display:flex;align-items:baseline;gap:8px;white-space:nowrap;overflow:hidden}
+      .title{font-size:15px;font-weight:600;letter-spacing:-0.01em}
+      .upt{font-size:13px;color:${text3};overflow:hidden;text-overflow:ellipsis;font-variant-numeric:tabular-nums}
+      .status{display:inline-flex;align-items:center;gap:7px;height:28px;box-sizing:border-box;padding:0 10px;border:1px solid ${line};border-radius:8px;font-size:12px;font-weight:500;white-space:nowrap}
+      .status .i{margin-left:-2px}
+      .dot{flex:none;width:7px;height:7px;border-radius:50%}
+      .gear{flex:none;width:28px;height:28px;padding:0;border:0;border-radius:8px;background:none;display:grid;place-items:center;cursor:pointer;color:${text2};transition:background .12s,color .12s}
+      .gear:hover,.gear[aria-expanded=true]{background:${fill};color:${text}}
+      .gear svg,.chev,summary .cv{width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round}
+      :is(.gear,.ring,.seg button,.sw,summary,.i):focus-visible{outline:2px solid ${accent};outline-offset:2px}
+      /* type */
+      .k{display:flex;align-items:center;gap:6px;min-width:0;font-size:12px;font-weight:500;color:${text2};white-space:nowrap}
+      .num{font-variant-numeric:tabular-nums;line-height:1.1;white-space:nowrap}
+      .num b{font-size:26px;font-weight:600;letter-spacing:-0.025em}.num span{font-size:13px;font-weight:500;color:${text2};margin-left:2px}
+      .sub{font-size:12px;color:${text3};font-variant-numeric:tabular-nums}
+      /* divided grids: one outline, hairlines between cells */
+      .cells{display:grid;border:1px solid ${line};border-radius:10px;overflow:hidden}
+      .cells>*,.sparks>*{min-width:0;box-shadow:1px 0 0 ${line},0 1px 0 ${line}}
       /* hero: board drawing + status facts */
-      .hero{display:grid;grid-template-columns:minmax(0,272px) minmax(0,1fr);gap:16px;align-items:stretch}
+      .hero{display:grid;grid-template-columns:minmax(0,264px) minmax(0,1fr);gap:12px}
       .hero.solo{grid-template-columns:1fr}
-      .board{background:var(--sh-surface-2, #FAFAFB);border:1px solid ${border};border-radius:10px;padding:10px 12px;display:grid;place-items:center}
-      .board svg{width:100%;max-width:248px;height:auto;overflow:visible;display:block}
-      .board .pcb{fill:var(--sh-surface, var(--card-background-color, #fff));stroke:${text3};stroke-width:1}
+      .board{border:1px solid ${line};border-radius:10px;background:${raised};padding:12px;display:grid;place-items:center}
+      .board svg{width:100%;max-width:240px;height:auto;overflow:visible;display:block}
+      .board .pcb{fill:${surface};stroke:${text3};stroke-width:1}
       .board .ln{fill:none;stroke:${text3};stroke-width:.9}
-      .board .pt{fill:var(--sh-surface, var(--card-background-color, #fff));stroke:${text3};stroke-width:.9}
+      .board .pt{fill:${surface};stroke:${text3};stroke-width:.9}
       .board .pin{fill:${text3};opacity:.55}
       .board .lbl{font-family:inherit;font-size:5.6px;font-weight:600;fill:${text3};letter-spacing:.08em}
       .board [data-tip]{cursor:help}
@@ -224,100 +275,131 @@ class PiVitalsCard extends HTMLElement {
       .board .fan.off{animation:none}
       .board .sd.on{animation:blink 1.2s ease-in-out infinite}
       @keyframes spin{to{transform:rotate(360deg)}}@keyframes blink{50%{opacity:.35}}
-      @media (prefers-reduced-motion:reduce){.board .fan,.board .sd.on{animation:none}}
-      .facts2{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px 16px;align-content:center;min-width:0}
-      .fx{min-width:0}
-      .fx .k{display:flex;align-items:center;gap:6px}.fx .k i{flex:none;width:6px;height:6px;border-radius:50%}
-      .fx .val{font-size:15px;font-weight:600;color:${text};margin-top:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-variant-numeric:tabular-nums}
-      .fx .sub{margin-top:1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+      .facts2{grid-template-columns:repeat(3,minmax(0,1fr))}
+      .fx{padding:12px 14px}
+      .fx .val{font-size:14px;font-weight:600;margin-top:6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-variant-numeric:tabular-nums}
+      .fx .sub{margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
       /* rings */
-      .rings{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;align-items:start}
-      .ring{display:flex;align-items:center;gap:10px;min-width:0}
-      .ring[data-detail]{cursor:pointer;border-radius:10px;margin:-4px;padding:4px;transition:background .15s}
-      .ring[data-detail]:hover,.ring[data-detail]:focus-visible{background:${fill};outline:none}
+      .rings{grid-template-columns:repeat(4,minmax(0,1fr))}
+      .ring{position:relative;display:flex;align-items:center;gap:12px;padding:14px}
+      .ring[data-detail]{cursor:pointer;transition:background .12s}
+      .ring[data-detail]:hover{background:${hover}}
+      .ring:focus-visible{outline-offset:-2px}
       .ring svg{flex:none;width:58px;height:58px;transform:rotate(-90deg)}
       .ring circle{fill:none;stroke-width:7;stroke-linecap:round}
       .ring .trk{stroke:${fill}}
       .ring .val{transition:stroke-dashoffset .6s ease,stroke .3s}
-      .ring>div{min-width:0}
-      /* panels */
-      .panel{background:var(--sh-surface-2, #FAFAFB);border:1px solid ${border};border-radius:10px;padding:12px 14px}
-      .live-k{display:flex;align-items:center;gap:6px}
-      .pulse{width:6px;height:6px;border-radius:50%;background:var(--sh-ok, #1F9D45);box-shadow:0 0 0 0 color-mix(in srgb, var(--sh-ok, #1F9D45) 60%, transparent);animation:p 2s infinite}
-      @keyframes p{70%{box-shadow:0 0 0 6px color-mix(in srgb, var(--sh-ok, #1F9D45) 0%, transparent)}100%{box-shadow:0 0 0 0 color-mix(in srgb, var(--sh-ok, #1F9D45) 0%, transparent)}}
-      .sparks{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:14px;margin-top:10px}
-      .spark{min-width:0}
-      .spark .num b{font-size:18px;letter-spacing:-0.01em}
-      .spark .lbl{display:flex;align-items:center;gap:5px;font-size:12px;font-weight:500;color:${text2};white-space:nowrap}
-      .spark .lbl i{flex:none;width:6px;height:6px;border-radius:50%}
-      .sv{position:relative;margin-top:4px;touch-action:pan-y;cursor:crosshair;-webkit-user-select:none;user-select:none}
+      .ring .rt{min-width:0;padding-right:12px}
+      .ring .num{margin-top:4px}
+      .ring .sub{margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+      .chev{position:absolute;top:12px;right:10px;color:${text3};opacity:.55;transition:opacity .12s,transform .12s}
+      .ring .chev{width:16px;height:16px;transform:none}
+      .ring:hover .chev{opacity:1;transform:translateX(2px)}
+      /* sections */
+      .panel{border:1px solid ${line};border-radius:10px;overflow:hidden;min-width:0}
+      .ph{display:flex;align-items:center;gap:8px;min-height:40px;box-sizing:border-box;padding:0 14px;border-bottom:1px solid ${line};background:${raised}}
+      .ph b{font-size:13px;font-weight:600;white-space:nowrap}
+      .ph .m{margin-left:auto;font-size:12px;color:${text3};white-space:nowrap;font-variant-numeric:tabular-nums}
+      .pb{padding:0 14px}
+      .pulse{flex:none;width:7px;height:7px;border-radius:50%;background:var(--sh-ok, #1F9D45);animation:p 2s infinite}
+      @keyframes p{0%{box-shadow:0 0 0 0 color-mix(in srgb, var(--sh-ok, #1F9D45) 55%, transparent)}70%,100%{box-shadow:0 0 0 6px transparent}}
+      @media (prefers-reduced-motion:reduce){.board .fan,.board .sd.on,.pulse{animation:none}}
+      .sparks{display:grid;grid-template-columns:repeat(6,minmax(0,1fr))}
+      .spark{padding:12px 14px}
+      .spark .num{margin-top:6px}.spark .num b{font-size:18px;letter-spacing:-0.015em}
+      .spark .lbl{display:flex;align-items:center;gap:6px;font-size:12px;font-weight:500;color:${text2};white-space:nowrap;overflow:hidden}
+      .spark .lbl .dot{width:6px;height:6px}
+      .sv{position:relative;margin-top:6px;touch-action:pan-y;cursor:crosshair;-webkit-user-select:none;user-select:none}
       .sv svg{display:block;width:100%;height:44px;overflow:visible}
       .scur{position:absolute;top:0;bottom:0;width:1px;background:${text3};pointer-events:none;display:none}
-      .sdot{position:absolute;width:9px;height:9px;box-sizing:border-box;border-radius:50%;border:2px solid var(--sh-surface, var(--card-background-color, #fff));transform:translate(-50%,-50%);pointer-events:none;display:none}
-      .stip{position:absolute;bottom:100%;margin-bottom:6px;pointer-events:none;background:var(--sh-surface, var(--card-background-color, #fff));border:1px solid ${border};border-radius:10px;box-shadow:0 8px 24px rgba(0,0,0,.18);padding:6px 10px;white-space:nowrap;display:none;z-index:3}
+      .sdot{position:absolute;width:9px;height:9px;box-sizing:border-box;border-radius:50%;border:2px solid ${surface};transform:translate(-50%,-50%);pointer-events:none;display:none}
+      .stip{position:absolute;bottom:100%;margin-bottom:6px;pointer-events:none;background:${surface};border:1px solid ${line};border-radius:10px;box-shadow:0 8px 24px rgba(0,0,0,.18);padding:6px 10px;white-space:nowrap;display:none;z-index:3}
       .stip b{font-size:17px;font-weight:600;font-variant-numeric:tabular-nums;color:${text}}.stip span{font-size:12px;color:${text2}}
       .stip div{font-size:12px;color:${text2};font-variant-numeric:tabular-nums}
       .sv.on .scur,.sv.on .sdot,.sv.on .stip{display:block}
-      .grid3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
-      .row{margin-top:10px}
-      .rowh{display:flex;justify-content:space-between;align-items:baseline;gap:8px;font-size:13px;color:${text2}}
-      .rowh b{color:${text};font-variant-numeric:tabular-nums;font-weight:600}
-      .bar{display:flex;height:6px;border-radius:999px;overflow:hidden;background:${fill};margin-top:6px}
+      .grid3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;align-items:start}
+      .row{padding:12px 0}
+      .row+.row{border-top:1px solid ${line}}
+      .rowh{display:flex;justify-content:space-between;align-items:center;gap:8px;color:${text2};white-space:nowrap}
+      .rowh>span:first-child{display:flex;align-items:center;gap:6px}
+      .rowh b{color:${text};font-weight:600;font-variant-numeric:tabular-nums}
+      .bar{display:flex;height:6px;border-radius:999px;overflow:hidden;background:${fill};margin-top:8px}
       .bar span{display:block;height:100%;border-radius:999px;transition:width .6s ease}
-      .kvs{margin-top:6px}
-      .kvr{display:flex;justify-content:space-between;align-items:baseline;gap:10px;padding:8px 0;border-top:1px solid ${border};font-size:13px;color:${text2}}
+      .row+.kvs{border-top:1px solid ${line}}
+      .kvr{display:flex;justify-content:space-between;align-items:center;gap:10px;min-height:40px;box-sizing:border-box;padding:8px 0;border-top:1px solid ${line};color:${text2}}
       .kvr:first-child{border-top:0}
-      .kvr>span:first-child{white-space:nowrap}
-      .kvr b{font-weight:600;color:${text};font-variant-numeric:tabular-nums;text-align:right}
-      .kvr .x{font-weight:400;color:${text2}}
+      .kvr>span:first-child{display:flex;align-items:center;gap:6px;white-space:nowrap}
+      .kvr b{font-weight:500;color:${text};font-variant-numeric:tabular-nums;text-align:right}
+      .kvr .x{font-weight:400;color:${text3}}
       .flags{display:flex;flex-wrap:wrap;gap:4px;justify-content:flex-end}
-      .loads{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin-top:8px}
-      .loads .num b{font-size:22px}
-      .mini{height:6px;border-radius:999px;background:${fill};margin-top:6px;overflow:hidden}.mini span{display:block;height:100%;background:var(--pv-accent, var(--sh-infra, #0071E3));border-radius:999px}
-      .facts{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px 16px;margin-top:12px}
-      .fact .val{font-size:14px;font-weight:600;color:${text};font-variant-numeric:tabular-nums;margin-top:4px}
-      .foot{font-size:12px;color:${text3}}
-      .i{display:inline-grid;place-items:center;cursor:help;color:${text3};vertical-align:middle;outline:none;margin-left:2px}
-      .i ha-icon{--mdc-icon-size:14px}.i:hover,.i:focus{color:var(--sh-accent, #0071E3)}
-      .k .i ha-icon{--mdc-icon-size:13px}
-      .tipbox{position:fixed;z-index:10;max-width:280px;background:var(--sh-surface, var(--card-background-color, #FFFFFF));color:${text};border:1px solid ${border};font-size:13px;line-height:1.4;padding:10px 12px;border-radius:10px;box-shadow:var(--sh-overlay-shadow, 0 8px 24px rgba(0,0,0,.14));pointer-events:none;opacity:0;transition:opacity .12s;text-transform:none;letter-spacing:0;font-weight:400;font-family:inherit}
+      .loads{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+      .loads .num{margin-top:4px}.loads .num b,.kv .num b{font-size:20px;letter-spacing:-0.015em}
+      .mini{height:4px;border-radius:999px;background:${fill};margin-top:8px;overflow:hidden}.mini span{display:block;height:100%;background:${accent};border-radius:999px}
+      .kv{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+      .kv .num{margin-top:4px}
+      .facts{grid-template-columns:repeat(4,minmax(0,1fr));margin-top:12px}
+      .foot{font-size:12px;color:${text3};margin-top:12px}
+      .i{display:inline-grid;place-items:center;cursor:help;color:${text3};border-radius:50%}
+      .i ha-icon{--mdc-icon-size:14px}.i:hover,.i:focus-visible{color:${text}}
+      .tipbox{position:fixed;z-index:10;max-width:280px;background:${surface};color:${text};border:1px solid ${line};font-size:13px;line-height:1.45;padding:10px 12px;border-radius:10px;box-shadow:0 12px 32px -8px rgba(0,0,0,.25);pointer-events:none;opacity:0;transition:opacity .12s;font-weight:400}
       .tipbox.show{opacity:1}
-      table{width:100%;border-collapse:collapse;font-size:13px;font-variant-numeric:tabular-nums;margin-top:8px}
-      th{font-size:11px;font-weight:500;color:${text3};text-transform:uppercase;letter-spacing:.04em;text-align:right;padding:0 0 6px 10px}
+      table{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}
+      th{font-size:12px;font-weight:500;color:${text3};text-align:right;padding:10px 0 8px 12px;white-space:nowrap}
       th:first-child,td:first-child{text-align:left;padding-left:0}
-      td{padding:8px 0 8px 10px;border-top:1px solid ${border};text-align:right;color:${text};white-space:nowrap}
+      td{height:40px;padding:0 0 0 12px;border-top:1px solid ${line};text-align:right;white-space:nowrap}
       td:first-child{white-space:normal}
-      td .sub{font-size:11px}
-      .pill{display:inline-flex;align-items:center;gap:6px;height:22px;box-sizing:border-box;padding:0 8px;border-radius:999px;background:${fill};font-size:12px;font-weight:500;color:${text2};vertical-align:middle;white-space:nowrap}
+      td .sub{margin-left:4px}
+      .apps tr:not(:first-child):hover td{background:${hover}}
+      .apps{margin:0 -14px;width:calc(100% + 28px)}.apps th:first-child,.apps td:first-child{padding-left:14px}.apps th:last-child,.apps td:last-child{padding-right:14px}
+      .pill{display:inline-flex;align-items:center;gap:6px;height:22px;box-sizing:border-box;padding:0 8px;border:1px solid ${line};border-radius:6px;font-size:12px;font-weight:500;color:${text};white-space:nowrap;vertical-align:middle}
       .pill::before{content:"";flex:none;width:6px;height:6px;border-radius:50%;background:var(--sh-neutral, #A1A1A6)}
       .on::before{background:var(--sh-ok, #1F9D45)}.off::before{background:var(--sh-neutral, #A1A1A6)}.upd::before{background:var(--sh-warn, #D97706)}.bad::before{background:var(--sh-bad, #E5302A)}
-      .pv{display:inline-block;min-width:44px;box-sizing:border-box;text-align:center;font-size:12px;font-weight:500;padding:3px 7px;border-radius:999px;background:${fill}}
-      .kv{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin-top:8px}
-      .kv .num b{font-size:22px}
-      .setup{display:flex;gap:10px;align-items:flex-start;border:1px solid color-mix(in srgb, var(--sh-warn, #D97706) 35%, transparent);background:color-mix(in srgb, var(--sh-warn, #D97706) 7%, transparent);border-radius:10px;padding:10px 12px;font-size:13px;line-height:1.45}
-      .setup ha-icon{--mdc-icon-size:18px;color:var(--sh-warn, #D97706);flex:none;margin-top:1px}
+      .pv{display:inline-block;min-width:44px;box-sizing:border-box;text-align:center;font-size:12px;font-weight:500;padding:2px 6px;border-radius:6px;background:${fill}}
+      .psi td{height:34px}
+      .setup{display:flex;gap:10px;align-items:flex-start;border:1px solid color-mix(in srgb, var(--sh-warn, #D97706) 35%, transparent);background:color-mix(in srgb, var(--sh-warn, #D97706) 6%, transparent);border-radius:10px;padding:12px 14px;line-height:1.45}
+      .setup ha-icon{--mdc-icon-size:18px;color:var(--sh-warn, #D97706);flex:none;margin-top:0}
       .setup b{font-weight:600}
-      .setup a{color:var(--sh-accent, #0071E3);cursor:pointer;text-decoration:none;font-weight:500;white-space:nowrap}
-      details.more{border-top:1px solid ${border};padding-top:12px}
-      details.more summary{list-style:none;cursor:pointer;display:flex;align-items:center;gap:6px;font-size:13px;color:${text2};user-select:none}
+      .setup a{color:${accent};cursor:pointer;text-decoration:none;font-weight:500;white-space:nowrap}
+      details.more summary{list-style:none;cursor:pointer;display:flex;align-items:center;gap:8px;min-height:40px;box-sizing:border-box;padding:0 12px;border:1px solid ${line};border-radius:10px;color:${text3};user-select:none;transition:background .12s}
+      details.more summary:hover{background:${hover}}
       details.more summary::-webkit-details-marker{display:none}
-      details.more summary ha-icon{--mdc-icon-size:18px;transition:transform .2s}
-      details.more[open] summary ha-icon{transform:rotate(90deg)}
-      details.more summary b{color:${text};font-weight:600;margin-right:4px}
+      details.more summary .cv{flex:none;color:${text2};transition:transform .2s}
+      details.more[open] summary .cv{transform:rotate(90deg)}
+      details.more summary b{color:${text};font-weight:600}
       details.more .grid3{margin-top:12px}
+      /* settings menu */
+      .menu{position:absolute;top:54px;right:12px;z-index:6;width:300px;max-width:calc(100% - 24px);box-sizing:border-box;padding:6px;background:${surface};border:1px solid ${line};border-radius:12px;box-shadow:0 16px 40px -12px rgba(0,0,0,.3),0 2px 6px rgba(0,0,0,.06);display:none;transform-origin:top right}
+      .menu.open{display:block;animation:pop .14s ease-out}
+      @keyframes pop{from{opacity:0;transform:translateY(-4px) scale(.98)}}
+      .mh{display:flex;align-items:baseline;justify-content:space-between;padding:8px 10px 4px;font-size:13px;font-weight:600}
+      .mh span{font-size:12px;font-weight:400;color:${text3}}
+      .mr{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:8px 10px}
+      .mr b{display:block;font-weight:500}.mr small{display:block;font-size:12px;color:${text3}}
+      .sep{height:1px;background:${line};margin:4px 10px}
+      .seg{flex:none;display:inline-flex;padding:2px;border-radius:8px;background:${fill}}
+      .seg button{border:0;background:none;cursor:pointer;height:24px;min-width:40px;padding:0 10px;border-radius:6px;font-size:12px;font-weight:500;color:${text2}}
+      .seg button[aria-pressed=true]{background:${surface};color:${text};box-shadow:0 1px 2px rgba(0,0,0,.14)}
+      .sw{flex:none;position:relative;width:34px;height:20px;padding:0;border:0;border-radius:999px;background:${fill};cursor:pointer;transition:background .15s}
+      .sw::after{content:"";position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;background:#fff;box-shadow:0 1px 2px rgba(0,0,0,.25);transition:transform .15s}
+      .sw[aria-checked=true]{background:${accent}}.sw[aria-checked=true]::after{transform:translateX(14px)}
+      .mf{padding:6px 10px 8px;font-size:12px;color:${text3}}
       @container card (max-width:940px){.facts2{grid-template-columns:repeat(2,minmax(0,1fr))}}
       @container card (max-width:860px){.grid3{grid-template-columns:1fr}.sparks{grid-template-columns:repeat(3,minmax(0,1fr))}.facts{grid-template-columns:repeat(2,minmax(0,1fr))}}
-      @container card (max-width:640px){.hero{grid-template-columns:1fr}.board svg{max-width:240px}.rings{grid-template-columns:repeat(2,minmax(0,1fr))}}
-      @container card (max-width:520px){.sparks{grid-template-columns:repeat(2,minmax(0,1fr))}.apps td:first-child .sub,.apps .pt,.blurb{display:none}.apps .pill{padding:0 6px;gap:0}
-        .apps td,.apps th{padding-left:6px}.apps td{font-size:12px}.upt{visibility:hidden}.ring{gap:8px}.ring svg{width:50px;height:50px}.num b{font-size:24px}}
-    </style><ha-card><div class="head"></div><div class="hero"><div class="board"></div><div class="facts2"></div></div><div class="body"></div><div class="tipbox"></div></ha-card>`;
+      @container card (max-width:760px){.rings{grid-template-columns:repeat(2,minmax(0,1fr))}}
+      @container card (max-width:640px){.hero{grid-template-columns:1fr}}
+      @container card (max-width:520px){.sparks{grid-template-columns:repeat(2,minmax(0,1fr))}.apps td:first-child .sub,.apps .pt,.blurb,.upt{display:none}
+        .apps .pill{padding:0 6px;gap:0}.apps td,.apps th{padding-left:8px}.ring{gap:10px;padding:12px}.ring svg{width:50px;height:50px}.num b{font-size:22px}}
+    </style><ha-card><div class="head"><div class="hl"></div><button class="gear" aria-label="Settings" aria-haspopup="dialog" aria-expanded="false"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 4.5h6M11.5 4.5h2M2.5 11.5h2M7.5 11.5h6"/><circle cx="10" cy="4.5" r="1.5"/><circle cx="6" cy="11.5" r="1.5"/></svg></button></div><div class="hero"><div class="board"></div><div class="facts2 cells"></div></div><div class="body"></div><div class="menu" role="dialog" aria-label="Settings"></div><div class="tipbox"></div></ha-card>`;
     this.wireTips();
     const open = el => {
-      const [id, title, color, decimals, range] = el.dataset.detail.split("|");
-      if (window.shDetailChart) this.modal = window.shDetailChart.open(this._hass, { entity: id, title, icon: "mdi:raspberry-pi", color, decimals: +decimals, range });
+      const [id, title, color, decimals, range, temp] = el.dataset.detail.split("|");
+      if (window.shDetailChart) this.modal = window.shDetailChart.open(this._hass, { entity: id, title, icon: "mdi:raspberry-pi", color, decimals: +decimals, range, ...(temp ? { temperature_unit: "pi-vitals" } : {}) });
       else this.dispatchEvent(new CustomEvent("hass-more-info", { bubbles: true, composed: true, detail: { entityId: id } }));
     };
     this.shadowRoot.addEventListener("click", e => {
+      if (e.target.closest(".gear")) { this.toggleMenu(!this.menuOpen); return; }
+      const set = e.target.closest("[data-set]");
+      if (set) { const v = set.dataset.v; window.piVitals.save(this._hass, { [set.dataset.set]: v === "true" ? true : v === "false" ? false : v }); return; }
       const s = e.target.closest("summary"); if (s) { this.moreOpen = !s.parentElement.open; return; }
       const a = e.target.closest("[data-nav]"); if (a) { e.preventDefault(); history.pushState(null, "", a.dataset.nav); window.dispatchEvent(new CustomEvent("location-changed")); return; }
       const g = e.target.closest("[data-detail]"); if (g && !e.target.closest("[data-tip]")) open(g);
@@ -332,6 +414,26 @@ class PiVitalsCard extends HTMLElement {
     R0.addEventListener("pointerup", e => { if (e.pointerType !== "mouse") end(); });
     R0.addEventListener("pointercancel", end);
     R0.addEventListener("pointerout", e => { if (e.pointerType === "mouse" && svAt(e) && !svAt({ target: e.relatedTarget || R0.host })) end(); });
+  }
+  toggleMenu(on) {
+    this.menuOpen = on;
+    this.shadowRoot.querySelector(".gear")?.setAttribute("aria-expanded", on);
+    this.renderMenu();
+  }
+  // Settings for this card, saved to the viewer's profile. New options go here.
+  renderMenu() {
+    const m = this.shadowRoot?.querySelector(".menu"); if (!m) return;
+    m.classList.toggle("open", !!this.menuOpen);
+    if (!this.menuOpen) return;
+    const s = this.settings();
+    const seg = (key, opts) => `<div class="seg" role="group">${opts.map(([v, l]) => `<button data-set="${key}" data-v="${v}" aria-pressed="${s[key] === v}">${l}</button>`).join("")}</div>`;
+    const sw = (key, label) => `<button class="sw" role="switch" data-set="${key}" data-v="${!s[key]}" aria-checked="${s[key]}" aria-label="${label}"></button>`;
+    m.innerHTML = `<div class="mh">Settings<span>System</span></div>
+      <div class="mr"><div><b>Temperature</b><small>Readings, tips and charts</small></div>${seg("temperature_unit", [["F", "°F"], ["C", "°C"]])}</div>
+      <div class="sep"></div>
+      <div class="mr"><div><b>Explanations</b><small>The ⓘ next to each reading</small></div>${sw("tips", "Explanations")}</div>
+      <div class="mr"><div><b>Apps</b><small>Status, CPU and RAM per app</small></div>${sw("apps", "Apps")}</div>
+      <div class="mf">Saved to your profile, so it applies on every device.</div>`;
   }
   ring(pct, color) {
     const r = 24, c = 2 * Math.PI * r, p = Math.max(0, Math.min(100, pct ?? 0));
@@ -397,7 +499,7 @@ class PiVitalsCard extends HTMLElement {
   }
   render() {
     if (!this._hass || !this.config) return;
-    const cfg = this.config, C = this.C, H = this._hass.states, R = this.R;
+    const cfg = this.config, C = this.C, H = this._hass.states, R = this.R, S = this.settings(), tUnit = "°" + S.temperature_unit;
     const n = id => this.n(this.S(id)), v = id => this.v(this.S(id));
     const hn = id => { const x = parseFloat(H[id]?.state); return Number.isFinite(x) ? x : null; };
     const VA = H[R.vitals]?.attributes || {}, watts = hn(R.vitals);
@@ -405,7 +507,6 @@ class PiVitalsCard extends HTMLElement {
     const cpu = n("processor_use"), mem = n("memory_usage"), disk = n("disk_usage"), tRaw = n("processor_temperature");
     const tU = H[this.S("processor_temperature")]?.attributes?.unit_of_measurement || "°C", isF = /F/.test(tU);
     const tC = tRaw == null ? null : isF ? (tRaw - 32) * 5 / 9 : tRaw;
-    const tTxt = c => isF ? `${Math.round(c * 9 / 5 + 32)}` : c.toFixed(0);
     const memUse = n("memory_use"), memFree = n("memory_free"), memTot = memUse != null && memFree != null ? memUse + memFree : null;
     const dUse = n("disk_use"), dFree = n("disk_free"), dTot = dUse != null && dFree != null ? dUse + dFree : null;
     const swap = n("swap_usage"), swapUse = n("swap_use"), fan = n("pwmfan_fan_speed") ?? n("fan_speed");
@@ -453,7 +554,7 @@ class PiVitalsCard extends HTMLElement {
     boardEl.hidden = !isPi; this.shadowRoot.querySelector(".hero").classList.toggle("solo", !isPi);
     if (isPi && bsig !== this.boardSig) { this.boardSig = bsig; boardEl.innerHTML = this.board(bs); }
 
-    // header (model, uptime, verdict pill) and the status facts beside the board
+    // header (model, uptime, verdict badge, settings) and the status facts beside the board
     const fx = [];
     if (watts != null || ps) fx.push([uvNow ? C.bad : uvBoot ? C.warn : C.ok, "Power", uvNow ? "Under-voltage now" : uvBoot ? "Dipped since boot" : "Stable since boot", watts != null ? `${watts.toFixed(2)} W board` : "Supply checker", "uv"]);
     if (thr) fx.push([slowNow ? C.bad : slowBoot ? C.warn : C.ok, "Throttling", slowNow ? "Active now" : slowBoot ? "Earlier since boot" : "None since boot", VA.arm_mhz ? `CPU at ${VA.arm_mhz.toLocaleString()} MHz` : "", "throttle"]);
@@ -462,75 +563,78 @@ class PiVitalsCard extends HTMLElement {
     fx.push([pendingU.length ? C.warn : C.ok, "Updates", pendingU.length ? `${pendingU.length} available` : "All current", pendingU.length ? pendingU.map(u => (u.attributes.friendly_name || "").replace(/ update$/i, "")).join(", ") : `${updates.length} tracked`, "updates"]);
     if (wired) fx.push([C.ok, "Network", "Ethernet", ifc, "net"]);
     else if (dbm != null) fx.push([dbm > -67 ? C.ok : dbm > -75 ? C.warn : C.bad, "Wi-Fi", dbm > -60 ? "Excellent" : dbm > -70 ? "Good" : dbm > -75 ? "Fair" : "Weak", `${String(dbm).replace("-", "−")} dBm`, "wifi"]);
-    this.shadowRoot.querySelector(".head").innerHTML = `<ha-icon icon="${isPi ? "mdi:raspberry-pi" : "mdi:server"}"></ha-icon><span class="title">${model}</span>
-      <span class="upt">${up ? "· up " + up : ""}</span><span class="status"><i style="background:${vColor}"></i>${verdict}${this.tip("status")}</span>`;
+    this.shadowRoot.querySelector(".hl").innerHTML = `<span class="tile"><ha-icon icon="${isPi ? "mdi:raspberry-pi" : "mdi:server"}"></ha-icon></span>
+      <div class="ttl"><span class="title">${model}</span>${up ? `<span class="upt">Up ${up}</span>` : ""}</div>
+      <span class="status"><i class="dot" style="background:${vColor}"></i>${verdict}${this.tip("status")}</span>`;
     this.shadowRoot.querySelector(".facts2").innerHTML = fx.map(([c, k, val, sub, t]) =>
-      `<div class="fx"><div class="k"><i style="background:${c}"></i>${k} ${this.tip(t)}</div><div class="val">${val}</div><div class="sub" title="${sub}">${sub || "&nbsp;"}</div></div>`).join("");
+      `<div class="fx"><div class="k"><i class="dot" style="background:${c}"></i>${k}${this.tip(t)}</div><div class="val">${val}</div><div class="sub" title="${sub}">${sub || "&nbsp;"}</div></div>`).join("");
 
     // gauges
     const gauges = [
-      ["CPU", "cpu", cpu == null ? "—" : Math.round(cpu), "%", cpu, busy(cpu, 60, 85) || C.accent, l1 != null ? `load ${l1.toFixed(2)}` : `${cores} cores`, `${this.S("processor_use")}|CPU|infra|0|6H`],
+      ["CPU", "cpu", cpu == null ? "—" : Math.round(cpu), "%", cpu, busy(cpu, 60, 85) || C.accent, l1 != null ? `Load ${l1.toFixed(2)}` : `${cores} cores`, `${this.S("processor_use")}|CPU|infra|0|6H`],
       ["Memory", "mem", mem == null ? "—" : Math.round(mem), "%", mem, busy(mem, 70, 90) || C.accent, memTot ? `${gb(memUse)} of ${gb(memTot)} GB` : "", `${this.S("memory_usage")}|Memory|infra|0|6H`],
       ["Disk", "disk", disk == null ? "—" : Math.round(disk), "%", disk, busy(disk, 75, 90) || C.accent, dTot ? `${dUse.toFixed(1)} of ${dTot.toFixed(0)} GB` : "", `${this.S("disk_usage")}|Disk|infra|1|7D`],
-      ["Temp", "temp", tC == null ? "—" : tTxt(tC), tU, tC == null ? 0 : tC / 85 * 100, tempColor, tC == null ? "" : `${isF ? tC.toFixed(1) + " °C · " : ""}${fan != null ? (fan ? Math.round(fan).toLocaleString() + " rpm" : "fan idle") : ""}`.replace(/ · $/, ""), `${this.S("processor_temperature")}|CPU temperature|climate|1|1H`],
+      ["Temperature", "temp", tC == null ? "—" : Math.round(this.tC2D(tC)), tUnit, tC == null ? 0 : tC / 85 * 100, tempColor, fan == null ? "" : fan ? `Fan ${Math.round(fan).toLocaleString()} rpm` : "Fan idle", `${this.S("processor_temperature")}|CPU temperature|climate|1|1H|t`],
     ];
     const gaugesHtml = gauges.filter(g => H[g[7].split("|")[0]]).map(([name, t, val, u, pct, col, sub, det]) => `<div class="ring" data-detail="${det}" role="button" tabindex="0" aria-label="Open ${name} history">${this.ring(pct, col)}
-      <div><div class="k">${name} ${this.tip(t)}</div><div class="num"><b>${val}</b><span>${u}</span></div><div class="sub">${sub}</div></div></div>`).join("");
+      <div class="rt"><div class="k">${name}${this.tip(t)}</div><div class="num"><b>${val}</b><span>${u}</span></div><div class="sub">${sub || "&nbsp;"}</div></div><svg class="chev" viewBox="0 0 16 16" aria-hidden="true"><path d="M6.5 4l4 4-4 4"/></svg></div>`).join("");
 
     // sparks
     const fmt = (x, u) => x == null ? "—" : u === "MB/s" ? (x < 1 ? (x * 1000).toFixed(0) : x.toFixed(1)) : u === "W" ? x.toFixed(2) : /°/.test(u) ? x.toFixed(0) : u === "" ? x.toFixed(2) : Math.round(x);
     const unit = (x, u) => u === "MB/s" ? (x != null && x < 1 ? "KB/s" : "MB/s") : u;
+    const toD = x => x == null ? null : this.tC2D(isF ? (x - 32) * 5 / 9 : x);
     this.sfmt = {}; this.sunit = {};
     const sparks = this.sparkDefs().map(([key, id, name, u]) => {
-      const x = this.n(id), col = key === "temp" ? C.climate : C.accent;
-      this.sfmt[id] = y => fmt(y, u); this.sunit[id] = y => unit(y, u);
-      return `<div class="spark"><div class="lbl"><i style="background:${col}"></i>${name}${key === "down" ? " " + this.tip("net") : ""}</div>
-      <div class="num"><b>${fmt(x, u)}</b><span>${unit(x, u)}</span></div>
+      const x = this.n(id), col = key === "temp" ? C.climate : C.accent, temp = key === "temp";
+      this.sfmt[id] = y => temp ? fmt(toD(y), tUnit) : fmt(y, u); this.sunit[id] = y => temp ? tUnit : unit(y, u);
+      return `<div class="spark"><div class="lbl"><i class="dot" style="background:${col}"></i>${name}${key === "down" ? this.tip("net") : ""}</div>
+      <div class="num"><b>${this.sfmt[id](x)}</b><span>${this.sunit[id](x)}</span></div>
       <div class="sv" data-id="${id}" data-c="${col}">${this.spark(id, col)}<div class="scur"></div><div class="sdot"></div><div class="stip"></div></div></div>`; }).join("");
 
-    // storage panel
+    // sections
+    const panel = (title, body, meta = "", tip = "") => `<div class="panel"><div class="ph"><b>${title}</b>${tip ? this.tip(tip) : ""}${meta ? `<span class="m">${meta}</span>` : ""}</div><div class="pb">${body}</div></div>`;
     const sz = mib => mib == null ? "—" : mib >= 1024 ? (mib / 1024).toFixed(2) + " GB" : Math.round(mib) + " MB";
     const mb = x => x >= 1000 ? (x / 1000).toFixed(2) + " GB" : Math.round(x) + " MB";
-    const kvr = (label, val, tip) => `<div class="kvr"><span>${label}${tip ? " " + this.tip(tip) : ""}</span><b>${val}</b></div>`;
-    const storage = `<div class="panel"><div class="k">Storage${VA.disk_device ? " · " + devKind(VA.disk_device) : ""}</div>
-      <div class="row"><div class="rowh"><span>Disk ${this.tip("storage")}</span><span><b>${dUse != null ? dUse.toFixed(1) : "—"} GB</b> used · ${dFree != null ? dFree.toFixed(1) : "—"} free</span></div>
+    const kvr = (label, val, tip) => `<div class="kvr"><span>${label}${tip ? this.tip(tip) : ""}</span><b>${val}</b></div>`;
+    const storage = panel("Storage", `
+      <div class="row"><div class="rowh"><span>Disk${this.tip("storage")}</span><span><b>${dUse != null ? dUse.toFixed(1) : "—"} GB</b> used · ${dFree != null ? dFree.toFixed(1) : "—"} free</span></div>
         <div class="bar"><span style="width:${disk ?? 0}%;background:${busy(disk, 80, 90) || C.accent}"></span></div></div>
-      <div class="kvs" style="margin-top:10px">
-        ${VA.db_mb != null ? kvr("Database", `${mb(VA.db_mb)} <span class="x">· ${VA.db_mb_per_day != null ? (VA.db_mb_per_day >= 0 ? "+" : "") + VA.db_mb_per_day + " MB/day" : "growth after 1 day"}</span>`, "db") : ""}
+      <div class="kvs">
+        ${VA.db_mb != null ? kvr("Database", `${mb(VA.db_mb)} <span class="x">· ${VA.db_mb_per_day != null ? (VA.db_mb_per_day >= 0 ? "+" : "−") + Math.abs(VA.db_mb_per_day) + " MB/day" : "growth after 1 day"}</span>`, "db") : ""}
         ${VA.disk_written_gb != null ? kvr("Written since boot", `${VA.disk_written_gb} GB`, "writes") : ""}
         ${VA.disk_write_kbs != null ? kvr("Writing now", `${VA.disk_write_kbs} kB/s`) : ""}
         ${kvr("Swap", `${swapUse != null ? Math.round(swapUse) : "—"} MB <span class="x">· ${swap ?? "—"}%</span>`, "swap")}
-      </div></div>`;
-    // power & performance panel
+      </div>`, devKind(VA.disk_device) || "");
     const flagName = { under_voltage: "Under-voltage", freq_capped: "Capped", throttled: "Throttled", soft_temp_limit: "Soft temp limit" };
     const flagPills = (list, cls) => list.length ? `<span class="flags">${list.map(f => `<span class="pill ${cls}">${flagName[f] || f}</span>`).join("")}</span>` : `<span class="pill on">None</span>`;
-    const perf = `<div class="panel"><div class="k">Power & performance</div><div class="kvs">
+    const perf = panel("Power & performance", `<div class="kvs">
       ${watts != null ? kvr("Board power", `${watts.toFixed(2)} W`, "power_g") : ""}
       ${VA.arm_mhz ? kvr("CPU clock", `${VA.arm_mhz.toLocaleString()} MHz${/Pi 5/.test(model) ? ` <span class="x">of 2,400</span>` : ""}`, "clock") : ""}
       ${thr ? kvr("Throttling now", flagPills(tNow, "bad"), "throttle") + kvr("Since boot", flagPills(tBoot, "upd"), "throttle") : ""}
       ${!thr && ps ? kvr("Power supply", ps === "on" ? `<span class="pill bad">Under-voltage</span>` : `<span class="pill on">OK</span>`, "uv") : ""}
       ${fan != null ? kvr("Fan", fan ? `${Math.round(fan).toLocaleString()} rpm <span class="x">· ${Math.round(fan / cfg.fan_max_rpm * 100)}%</span>` : "Idle", "fan") : ""}
       ${!wired && dbm != null ? kvr("Wi-Fi signal", `${String(dbm).replace("-", "−")} dBm`, "wifi") : ""}
-    </div></div>`;
-    // backups & updates panel
-    const care = `<div class="panel"><div class="k">Backups & updates</div><div class="kvs">
+    </div>`);
+    const care = panel("Backups & updates", `<div class="kvs">
       ${H[bLast] ? kvr("Last backup", ago(bLast) || "—", "backup") + kvr("Next backup", ago(bNext) || "—") : ""}
       ${pendingU.length ? pendingU.map(u => kvr((u.attributes.friendly_name || u.entity_id).replace(/ update$/i, ""), `<span class="x">${u.attributes.installed_version ?? ""} →</span> <span class="pill upd">${u.attributes.latest_version}</span>`)).join("")
         : kvr("Updates", `<span class="pill on">All ${updates.length} current</span>`, "updates")}
-    </div></div>`;
+    </div>`, pendingU.length ? `${pendingU.length} pending` : "");
 
     // apps
     const pct1 = x => x == null ? "—" : (x < 10 ? x.toFixed(1) : Math.round(x)) + "%";
     const sys = [["Home Assistant Core", R.sys.core], ["Supervisor", R.sys.supervisor]].filter(([, d]) => d);
     const stateOf = id => id ? H[id]?.state : undefined;
-    const appsHtml = cfg.show_apps === false || !(sys.length || R.apps.length) ? "" : `<div class="panel"><div class="k">Apps ${this.tip("apps")}</div>
-      <table class="apps"><tr><th>App</th><th>Status</th><th>CPU</th><th>RAM</th><th>Version</th></tr>
+    const running = R.apps.filter(a => stateOf(a.running) === "on").length;
+    const appsHtml = !S.apps || !(sys.length || R.apps.length) ? "" : panel("Apps", `
+      <table class="apps"><tr><th>Name</th><th>Status</th><th>CPU</th><th>RAM</th><th>Version</th></tr>
         ${sys.map(([nm, d]) =>
-          `<tr><td>${nm} <span class="sub">system</span></td><td><span class="pill on"><span class="pt">Running</span></span></td><td>${pct1(hn(d.cpu_percent))}</td><td>${pct1(hn(d.memory_percent))}</td><td>${ver(d.update)}</td></tr>`).join("")}
+          `<tr><td>${nm}<span class="sub">System</span></td><td><span class="pill on"><span class="pt">Running</span></span></td><td>${pct1(hn(d.cpu_percent))}</td><td>${pct1(hn(d.memory_percent))}</td><td>${ver(d.update)}</td></tr>`).join("")}
         ${R.apps.map(a => { const run = stateOf(a.running) === "on", upd = stateOf(a.update) === "on";
           return `<tr><td>${a.name}</td><td><span class="pill ${run ? "on" : "off"}" title="${run ? "Running" : "Stopped"}"><span class="pt">${run ? "Running" : "Stopped"}</span></span></td>
             <td>${run ? pct1(hn(a.cpu_percent)) : "—"}</td><td>${run ? pct1(hn(a.memory_percent)) : "—"}</td>
-            <td>${stateOf(a.version) || "—"}${upd ? ` <span class="pill upd">→ ${stateOf(a.version_latest) || H[a.update]?.attributes?.latest_version}</span>` : ""}</td></tr>`; }).join("")}</table></div>`;
+            <td>${stateOf(a.version) || "—"}${upd ? ` <span class="pill upd">→ ${stateOf(a.version_latest) || H[a.update]?.attributes?.latest_version}</span>` : ""}</td></tr>`; }).join("")}</table>`,
+      R.apps.length ? `${running} of ${R.apps.length} running` : "", "apps");
 
     // setup help: System Monitor missing, or some of its sensors still off (it ships with most disabled)
     const smLink = `<a data-nav="/config/integrations/integration/systemmonitor">Open System Monitor ›</a>`;
@@ -538,7 +642,7 @@ class PiVitalsCard extends HTMLElement {
     const setup = this.legacy || R.noRegistry ? "" : !R.hasSM
       ? `<div class="setup"><ha-icon icon="mdi:wrench-outline"></ha-icon><div><b>Add the System Monitor integration</b> (Settings → Devices & services → Add integration → System Monitor), then turn on its sensors: most are off by default. <a data-nav="/config/integrations/dashboard">Open integrations ›</a></div></div>`
       : missing.length ? `<div class="setup"><ha-icon icon="mdi:toggle-switch-off-outline"></ha-icon><div><b>${missing.length === 1 ? "1 sensor is" : missing.length + " sensors are"} off:</b> ${missing.join(", ")}. Turn ${missing.length === 1 ? "it" : "them"} on in System Monitor's entity list. ${smLink}</div></div>` : "";
-    const vitalsHint = isPi && !H[R.vitals] ? `<div class="foot" style="margin-top:12px">Board power, throttling, CPU clock and SD-card wear come from the optional pi_vitals sensor (see the card's README).</div>` : "";
+    const vitalsHint = isPi && !H[R.vitals] ? `<div class="foot">Board power, throttling, CPU clock and SD-card wear come from the optional pi_vitals sensor (see the card's README).</div>` : "";
     // more details drawer
     const psiChip = x => x == null ? ["—", C.text3] : x >= 10 ? [x.toFixed(1) + "%", C.bad] : x >= 1 ? [x.toFixed(1) + "%", C.warn] : [x.toFixed(1) + "%", C.ok];
     const pv = (r, w) => n(`${r}_pressure_${w}_average`);
@@ -550,42 +654,40 @@ class PiVitalsCard extends HTMLElement {
     const days = boot ? (Date.now() - new Date(boot)) / 864e5 : null;
     const count = d => Object.keys(H).filter(k => k.startsWith(d + ".")).length;
     const ipv4 = v(`ipv4_address_${ifc}`);
-    const more = `<details class="more"${this.moreOpen ? " open" : ""}><summary><ha-icon icon="mdi:chevron-right"></ha-icon><b>More details</b><span class="blurb">memory, load and stall pressure, network counters, platform</span></summary>
+    const big = (label, val, u = "") => `<div><div class="sub">${label}</div><div class="num"><b>${val}</b>${u ? `<span>${u}</span>` : ""}</div></div>`;
+    const more = `<details class="more"${this.moreOpen ? " open" : ""}><summary><svg class="cv" viewBox="0 0 16 16" aria-hidden="true"><path d="M6.5 4l4 4-4 4"/></svg><b>More details</b><span class="blurb">Memory, load and stall pressure, network counters, platform</span></summary>
       <div class="grid3">
-        <div class="panel"><div class="k">Memory</div>
-          <div class="row"><div class="rowh"><span>RAM ${this.tip("ram")}</span><span><b>${memUse != null ? gb(memUse) : "—"} GB</b> used · ${memFree != null ? gb(memFree) : "—"} free</span></div>
+        ${panel("Memory", `
+          <div class="row"><div class="rowh"><span>RAM${this.tip("ram")}</span><span><b>${memUse != null ? gb(memUse) : "—"} GB</b> used · ${memFree != null ? gb(memFree) : "—"} free</span></div>
             <div class="bar"><span style="width:${mem ?? 0}%;background:${C.accent}"></span></div></div>
-          <div class="row"><div class="rowh"><span>Swap ${this.tip("swap")}</span><span><b>${swapUse != null ? Math.round(swapUse) : "—"} MB</b> · ${swap ?? "—"}%</span></div>
+          <div class="row"><div class="rowh"><span>Swap${this.tip("swap")}</span><span><b>${swapUse != null ? Math.round(swapUse) : "—"} MB</b> · ${swap ?? "—"}%</span></div>
             <div class="bar"><span style="width:${swap ?? 0}%;background:${C.accent}"></span></div></div>
-          <div class="kv"><div><div class="sub">Disk total</div><div class="num"><b>${hn(R.sys.host?.disk_total) ?? (dTot ? dTot.toFixed(0) : "—")}</b><span>GB</span></div></div>
-            <div><div class="sub">RAM total</div><div class="num"><b>${memTot ? gb(memTot) : "—"}</b><span>GB</span></div></div></div></div>
-        <div class="panel"><div class="k">Load average ${this.tip("load")}</div>
-          <div class="loads">${[["1 min", l1], ["5 min", l5], ["15 min", l15]].map(([k, x]) => `<div><div class="sub">${k}</div><div class="num"><b>${x != null ? x.toFixed(2) : "—"}</b></div>${loadBar(x)}</div>`).join("")}</div>
-          <div class="k" style="margin-top:14px">Stall pressure ${this.tip("psi_grid")}</div>
-          <table><tr><th></th><th>10 s</th><th>1 min</th><th>5 min</th></tr>
-            ${psiRows.map(([k, r, w]) => `<tr><td>${k}</td><td>${psiCell(pv(r, w + "_10s"))}</td><td>${psiCell(pv(r, w + "_60s"))}</td><td>${psiCell(pv(r, w + "_300s"))}</td></tr>`).join("")}</table></div>
-        <div class="panel"><div class="k">${wired ? "Network" : "Wi-Fi"} · since boot ${this.tip("net")}</div>
-          <div class="kv"><div><div class="sub">Downloaded</div><div class="num"><b>${sz(netIn).split(" ")[0]}</b><span>${sz(netIn).split(" ")[1] || ""}</span></div></div>
-            <div><div class="sub">Uploaded</div><div class="num"><b>${sz(netOut).split(" ")[0]}</b><span>${sz(netOut).split(" ")[1] || ""}</span></div></div>
-            <div><div class="sub">Packets in</div><div class="num"><b>${cnt(pIn)}</b></div></div>
-            <div><div class="sub">Packets out</div><div class="num"><b>${cnt(pOut)}</b></div></div></div>
-          <table><tr><th></th><th>In</th><th>Out</th></tr>
+          <div class="row kv">${big("Disk total", hn(R.sys.host?.disk_total) ?? (dTot ? dTot.toFixed(0) : "—"), "GB")}${big("RAM total", memTot ? gb(memTot) : "—", "GB")}</div>`)}
+        ${panel("Load average", `
+          <div class="row loads">${[["1 min", l1], ["5 min", l5], ["15 min", l15]].map(([k, x]) => `<div><div class="sub">${k}</div><div class="num"><b>${x != null ? x.toFixed(2) : "—"}</b></div>${loadBar(x)}</div>`).join("")}</div>
+          <div class="row"><div class="k">Stall pressure${this.tip("psi_grid")}</div>
+          <table class="psi"><tr><th></th><th>10 s</th><th>1 min</th><th>5 min</th></tr>
+            ${psiRows.map(([k, r, w]) => `<tr><td>${k}</td><td>${psiCell(pv(r, w + "_10s"))}</td><td>${psiCell(pv(r, w + "_60s"))}</td><td>${psiCell(pv(r, w + "_300s"))}</td></tr>`).join("")}</table></div>`, `${cores} cores`, "load")}
+        ${panel(wired ? "Network" : "Wi-Fi", `
+          <div class="row kv">${big("Downloaded", sz(netIn).split(" ")[0], sz(netIn).split(" ")[1] || "")}${big("Uploaded", sz(netOut).split(" ")[0], sz(netOut).split(" ")[1] || "")}
+            ${big("Packets in", cnt(pIn))}${big("Packets out", cnt(pOut))}</div>
+          <div class="row"><table><tr><th></th><th>In</th><th>Out</th></tr>
             <tr><td>Per day</td><td>${days ? sz(netIn / days) : "—"}</td><td>${days ? sz(netOut / days) : "—"}</td></tr>
-            <tr><td>Now</td><td>${fmt(n(`network_throughput_in_${ifc}`), "MB/s")} ${unit(n(`network_throughput_in_${ifc}`), "MB/s")}</td><td>${fmt(n(`network_throughput_out_${ifc}`), "MB/s")} ${unit(n(`network_throughput_out_${ifc}`), "MB/s")}</td></tr></table></div>
+            <tr><td>Now</td><td>${fmt(n(`network_throughput_in_${ifc}`), "MB/s")} ${unit(n(`network_throughput_in_${ifc}`), "MB/s")}</td><td>${fmt(n(`network_throughput_out_${ifc}`), "MB/s")} ${unit(n(`network_throughput_out_${ifc}`), "MB/s")}</td></tr></table></div>`, "Since boot", "net")}
       </div>
-      <div class="facts">
-        <div class="fact"><div class="k">Uptime ${this.tip("uptime")}</div><div class="val">${up || "—"} <span class="sub">· booted ${boot ? new Date(boot).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) : "—"}</span></div></div>
-        <div class="fact"><div class="k">Local IP ${this.tip("ip")}</div><div class="val">${ipv4 ?? "—"} <span class="sub">${ifc}</span></div></div>
-        <div class="fact"><div class="k">Home Assistant ${this.tip("ha_stats")}</div><div class="val">${Object.keys(H).length.toLocaleString()} entities <span class="sub">· ${count("automation")} automations · ${count("script")} scripts</span></div></div>
-        <div class="fact"><div class="k">Platform ${this.tip("ha")}</div><div class="val">${R.sys.os ? `OS ${stateOf(R.sys.os.version) ?? "—"} · ` : ""}<span class="sub">Core ${ver(R.sys.core?.update)}${VA.model ? " · " + VA.model : ""}</span></div></div>
+      <div class="facts cells">
+        <div class="fx"><div class="k">Uptime${this.tip("uptime")}</div><div class="val">${up || "—"}</div><div class="sub">Booted ${boot ? new Date(boot).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) : "—"}</div></div>
+        <div class="fx"><div class="k">Local IP${this.tip("ip")}</div><div class="val">${ipv4 ?? "—"}</div><div class="sub">${ifc}</div></div>
+        <div class="fx"><div class="k">Home Assistant${this.tip("ha_stats")}</div><div class="val">${Object.keys(H).length.toLocaleString()} entities</div><div class="sub">${count("automation")} automations · ${count("script")} scripts</div></div>
+        <div class="fx"><div class="k">Platform${this.tip("ha")}</div><div class="val">${R.sys.os ? `OS ${stateOf(R.sys.os.version) ?? "—"}` : `Core ${ver(R.sys.core?.update)}`}</div><div class="sub">${R.sys.os ? `Core ${ver(R.sys.core?.update)}` : "&nbsp;"}</div></div>
       </div>
-      ${cfg.footer ? `<div class="foot" style="margin-top:12px">${cfg.footer}</div>` : ""}${vitalsHint}
+      ${cfg.footer ? `<div class="foot">${cfg.footer}</div>` : ""}${vitalsHint}
     </details>`;
 
     const body = this.shadowRoot.querySelector(".body");
     body.innerHTML = `${setup}
-      <div class="rings">${gaugesHtml}</div>
-      <div class="panel"><div class="k live-k"><span class="pulse"></span>Live · last 10 minutes ${this.tip("live")}</div><div class="sparks">${sparks}</div></div>
+      <div class="rings cells">${gaugesHtml}</div>
+      <div class="panel"><div class="ph"><span class="pulse"></span><b>Live</b>${this.tip("live")}<span class="m">Last 10 minutes</span></div><div class="sparks">${sparks}</div></div>
       <div class="grid3">${storage}${perf}${care}</div>
       ${appsHtml}
       ${more}`;
