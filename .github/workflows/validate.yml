@@ -8,6 +8,8 @@ on:
 permissions: {}
 jobs:
   validate-hacs:
+    # HACS can only validate public repos; skip while the repo is private
+    if: ${{ !github.event.repository.private }}
     runs-on: "ubuntu-latest"
     steps:
       - name: HACS validation
