@@ -702,5 +702,5 @@ class PiVitalsCard extends HTMLElement {
 const PV_WINDOW = 10 * 60e3;
 if (!customElements.get("pi-vitals-card")) customElements.define("pi-vitals-card", PiVitalsCard);
 window.customCards = window.customCards || [];
-if (!window.customCards.some(c => c.type === "pi-vitals-card")) window.customCards.push({ type: "pi-vitals-card", name: "Pi Vitals", description: "Raspberry Pi health at a glance: board status, gauges, live sparklines, storage wear, throttling, backups and updates.", preview: true });
+if (!window.customCards.some(c => c.type === "pi-vitals-card")) window.customCards.push({ type: "pi-vitals-card", name: "Pi Vitals", description: "Raspberry Pi health at a glance: board status, gauges, live sparklines, storage wear, throttling, backups and updates.", preview: true, documentationURL: "https://github.com/samansabeti/pi-vitals-card" });
 console.info(`%c PI-VITALS-CARD %c v${PV_VERSION} `, "color:#fff;background:#111;font-weight:600", "color:#111;background:#eee");
