@@ -18,7 +18,7 @@ Every number has an ⓘ tooltip in plain English. Sensors are found by what they
 
 ## Install
 
-**HACS (custom repository):** HACS → ⋮ → Custom repositories → add `https://github.com/<you>/pi-vitals-card` as type *Dashboard* → install **Pi Vitals** → reload the browser.
+**HACS (custom repository):** HACS → ⋮ → Custom repositories → add `https://github.com/samansabeti/pi-vitals-card` as type *Dashboard* → install **Pi Vitals** → reload the browser.
 
 **Manual:** copy `pi-vitals-card.js` to `/config/www/`. Then add it under Settings → Dashboards → ⋮ → Resources as `/local/pi-vitals-card.js` (JavaScript module).
 
