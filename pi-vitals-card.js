@@ -133,9 +133,9 @@ class PiVitalsCard extends HTMLElement {
     if (this._hass && this.built) { this.sig = ""; this.boardSig = ""; this.sparkKey = null; this.hass = this._hass; }
   }
   connectedCallback() {
-    this.onSet = () => { this.render(); this.renderMenu(); };
-    this.onDoc = e => { if (this.menuOpen && !e.composedPath().some(n => n.classList?.contains("menu") || n.classList?.contains("gear"))) this.toggleMenu(false); };
-    this.onKey = e => { if (e.key === "Escape" && this.menuOpen) this.toggleMenu(false); };
+    this.onSet = () => { this.render(true); this.renderMenu(); };
+    this.onDoc = e => { if (this.tipPin && !e.composedPath().includes(this)) this.hideTip?.(); if (this.menuOpen && !e.composedPath().some(n => n.classList?.contains("menu") || n.classList?.contains("gear"))) this.toggleMenu(false); };
+    this.onKey = e => { if (e.key === "Escape") { if (this.tipEl) this.hideTip?.(); if (this.menuOpen) this.toggleMenu(false); } };
     addEventListener("pi-vitals-settings", this.onSet); addEventListener("click", this.onDoc, true); addEventListener("keydown", this.onKey);
   }
   disconnectedCallback() { removeEventListener("pi-vitals-settings", this.onSet); removeEventListener("click", this.onDoc, true); removeEventListener("keydown", this.onKey); }
@@ -170,13 +170,20 @@ class PiVitalsCard extends HTMLElement {
       const h = b.offsetHeight; b.style.top = (rc.bottom + 8 + h < innerHeight ? rc.bottom + 8 : rc.top - h - 8) + "px";
       this.tipEl = el;
     };
-    const hide = () => { box()?.classList.remove("show"); this.tipEl = null; };
-    r.addEventListener("mouseover", e => { const el = e.target.closest("[data-tip]"); if (el) show(el); });
-    r.addEventListener("mouseout", e => { if (e.target.closest("[data-tip]")) hide(); });
-    r.addEventListener("focusin", e => { const el = e.target.closest("[data-tip]"); if (el) show(el); });
-    r.addEventListener("focusout", hide);
-    r.addEventListener("click", e => { const el = e.target.closest("[data-tip]"); if (el) { e.stopPropagation(); this.tipEl === el ? hide() : show(el); } }, true);
-    addEventListener("scroll", hide, { passive: true, capture: true });
+    // Hover previews with a mouse only (a tap also fires hover events, which used to open the tip and let the click close it again).
+    // A click or tap pins the tip; tapping it again, tapping elsewhere, Escape or scrolling closes it.
+    const hide = () => { box()?.classList.remove("show"); this.tipEl = null; this.tipPin = false; };
+    this.hideTip = hide;
+    r.addEventListener("pointerover", e => { const el = e.pointerType === "mouse" && !this.tipPin && e.target.closest("[data-tip]"); if (el) show(el); });
+    r.addEventListener("pointerout", e => { if (e.pointerType === "mouse" && !this.tipPin && e.target.closest("[data-tip]")) hide(); });
+    r.addEventListener("focusin", e => { const el = !this.tipPin && e.target.matches?.(":focus-visible") && e.target.closest("[data-tip]"); if (el) show(el); });
+    r.addEventListener("focusout", () => { if (!this.tipPin) hide(); });
+    r.addEventListener("click", e => {
+      const el = e.target.closest("[data-tip]");
+      if (el) { e.stopPropagation(); if (this.tipPin && this.tipEl?.dataset.tip === el.dataset.tip) hide(); else { show(el); this.tipPin = true; } }
+      else if (this.tipPin) hide();
+    }, true);
+    addEventListener("scroll", () => { if (this.tipEl) hide(); }, { passive: true, capture: true });
   }
   v(id) { const s = this._hass.states[id]; return s && !["unknown", "unavailable"].includes(s.state) ? s.state : null; }
   n(id) { const x = parseFloat(this.v(id)); return Number.isFinite(x) ? x : null; }
@@ -390,14 +397,15 @@ class PiVitalsCard extends HTMLElement {
       .tile{flex:none;width:30px;height:30px;border-radius:8px;display:grid;place-items:center;background:color-mix(in srgb, ${accent} 12%, transparent);color:${accent}}
       .tile ha-icon{--mdc-icon-size:18px}
       .hl{display:contents}
-      .ttl{flex:1;min-width:0;display:flex;align-items:baseline;gap:8px;white-space:nowrap;overflow:hidden}
+      .ttl{flex:1 0 auto;min-width:0;display:flex;align-items:baseline;gap:8px;white-space:nowrap;overflow:hidden}
       .title{font-size:15px;font-weight:600;letter-spacing:-0.01em}
       .upt{font-size:13px;color:${text3};overflow:hidden;text-overflow:ellipsis;font-variant-numeric:tabular-nums}
-      .status{display:inline-flex;align-items:center;gap:7px;height:28px;box-sizing:border-box;padding:0 10px;border:1px solid ${line};border-radius:8px;font-size:12px;font-weight:500;white-space:nowrap}
+      .status .vt{min-width:0;overflow:hidden;text-overflow:ellipsis}
+      .status{flex:0 1 auto;min-width:0;display:inline-flex;align-items:center;gap:7px;height:28px;box-sizing:border-box;padding:0 10px;border:1px solid ${line};border-radius:8px;font-size:12px;font-weight:500;white-space:nowrap}
       .status .i{margin-left:-2px}
       .dot{flex:none;width:7px;height:7px;border-radius:50%}
       .gear{flex:none;width:28px;height:28px;padding:0;border:0;border-radius:8px;background:none;display:grid;place-items:center;cursor:pointer;color:${text2};transition:background .12s,color .12s}
-      .gear:hover,.gear[aria-expanded=true]{background:${fill};color:${text}}
+      .gear[aria-expanded=true]{background:${fill};color:${text}}
       .gear svg,.chev,summary .cv{width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round}
       :is(.gear,.ring,.seg button,.sw,summary,.i):focus-visible{outline:2px solid ${accent};outline-offset:2px}
       /* type */
@@ -427,7 +435,7 @@ class PiVitalsCard extends HTMLElement {
       .fx{padding:12px 14px}
       .fx .val{font-size:14px;font-weight:600;margin-top:6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-variant-numeric:tabular-nums}
       .fx .sub{margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-      .fx.lk{cursor:pointer;transition:background .12s}.fx.lk:hover{background:${hover}}.fx.lk:focus-visible{outline:2px solid ${accent};outline-offset:-2px}
+      .fx.lk{cursor:pointer;transition:background .12s}.fx.lk:focus-visible{outline:2px solid ${accent};outline-offset:-2px}
       .nrm{font-size:12px;color:${text3};margin-top:1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-variant-numeric:tabular-nums}
       .evs{margin:0 -14px}
       .ev{display:flex;align-items:center;gap:10px;min-height:40px;box-sizing:border-box;padding:8px 14px;border-top:1px solid ${line}}
@@ -437,12 +445,10 @@ class PiVitalsCard extends HTMLElement {
       .ev .ew{flex:none;font-size:12px;color:${text3};font-variant-numeric:tabular-nums}
       .ev.quiet{border:0;padding:12px 0;color:${text3}}
       .evmore{display:block;width:100%;height:36px;border:0;border-top:1px solid ${line};background:none;cursor:pointer;font-size:12px;font-weight:500;color:${text2};transition:background .12s}
-      .evmore:hover{background:${hover}}
       /* rings */
       .rings{grid-template-columns:repeat(4,minmax(0,1fr))}
       .ring{position:relative;display:flex;align-items:center;gap:12px;padding:14px}
       .ring[data-detail]{cursor:pointer;transition:background .12s}
-      .ring[data-detail]:hover{background:${hover}}
       .ring:focus-visible{outline-offset:-2px}
       .ring svg{flex:none;width:58px;height:58px;transform:rotate(-90deg)}
       .ring circle{fill:none;stroke-width:7;stroke-linecap:round}
@@ -453,7 +459,6 @@ class PiVitalsCard extends HTMLElement {
       .ring .sub{margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
       .chev{position:absolute;top:12px;right:10px;color:${text3};opacity:.55;transition:opacity .12s,transform .12s}
       .ring .chev{width:16px;height:16px;transform:none}
-      .ring:hover .chev{opacity:1;transform:translateX(2px)}
       /* sections */
       .panel{border:1px solid ${line};border-radius:10px;overflow:hidden;min-width:0}
       .ph{display:flex;align-items:center;gap:8px;min-height:40px;box-sizing:border-box;padding:0 14px;border-bottom:1px solid ${line};background:${raised}}
@@ -465,7 +470,7 @@ class PiVitalsCard extends HTMLElement {
       @media (prefers-reduced-motion:reduce){.board .fan,.board .sd.on,.pulse{animation:none}}
       .sparks{display:grid;grid-template-columns:repeat(6,minmax(0,1fr))}
       .spark{padding:12px 14px}
-      .spark[data-detail]{cursor:pointer;transition:background .12s}.spark[data-detail]:hover{background:${hover}}
+      .spark[data-detail]{cursor:pointer;transition:background .12s}
       .spark:focus-visible,.apps tr:focus-visible{outline:2px solid ${accent};outline-offset:-2px}
       .apps tr[data-detail]{cursor:pointer}
       .spark .num{margin-top:6px}.spark .num b{font-size:18px;letter-spacing:-0.015em}
@@ -502,7 +507,7 @@ class PiVitalsCard extends HTMLElement {
       .facts{grid-template-columns:repeat(4,minmax(0,1fr));margin-top:12px}
       .foot{font-size:12px;color:${text3};margin-top:12px}
       .i{display:inline-grid;place-items:center;cursor:help;color:${text3};border-radius:50%}
-      .i ha-icon{--mdc-icon-size:14px}.i:hover,.i:focus-visible{color:${text}}
+      .i ha-icon{--mdc-icon-size:14px}.i:focus-visible{color:${text}}
       .tipbox{position:fixed;z-index:10;max-width:280px;background:${surface};color:${text};border:1px solid ${line};font-size:13px;line-height:1.45;padding:10px 12px;border-radius:10px;box-shadow:0 12px 32px -8px rgba(0,0,0,.25);pointer-events:none;opacity:0;transition:opacity .12s;font-weight:400}
       .tipbox.show{opacity:1}
       table{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}
@@ -511,7 +516,6 @@ class PiVitalsCard extends HTMLElement {
       td{height:40px;padding:0 0 0 12px;border-top:1px solid ${line};text-align:right;white-space:nowrap}
       td:first-child{white-space:normal}
       td .sub{margin-left:4px}
-      .apps tr:not(:first-child):hover td{background:${hover}}
       .apps{margin:0 -14px;width:calc(100% + 28px)}.apps th:first-child,.apps td:first-child{padding-left:14px}.apps th:last-child,.apps td:last-child{padding-right:14px}
       .pill{display:inline-flex;align-items:center;gap:6px;height:22px;box-sizing:border-box;padding:0 8px;border:1px solid ${line};border-radius:6px;font-size:12px;font-weight:500;color:${text};white-space:nowrap;vertical-align:middle}
       .pill::before{content:"";flex:none;width:6px;height:6px;border-radius:50%;background:var(--sh-neutral, #A1A1A6)}
@@ -523,7 +527,6 @@ class PiVitalsCard extends HTMLElement {
       .setup b{font-weight:600}
       .setup a{color:${accent};cursor:pointer;text-decoration:none;font-weight:500;white-space:nowrap}
       details.more summary{list-style:none;cursor:pointer;display:flex;align-items:center;gap:8px;min-height:40px;box-sizing:border-box;padding:0 12px;border:1px solid ${line};border-radius:10px;color:${text3};user-select:none;transition:background .12s}
-      details.more summary:hover{background:${hover}}
       details.more summary::-webkit-details-marker{display:none}
       details.more summary .cv{flex:none;color:${text2};transition:transform .2s}
       details.more[open] summary .cv{transform:rotate(90deg)}
@@ -545,14 +548,30 @@ class PiVitalsCard extends HTMLElement {
       .sw::after{content:"";position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;background:#fff;box-shadow:0 1px 2px rgba(0,0,0,.25);transition:transform .15s}
       .sw[aria-checked=true]{background:${accent}}.sw[aria-checked=true]::after{transform:translateX(14px)}
       .mf{padding:6px 10px 8px;font-size:12px;color:${text3}}
+      /* hover only where there's a real pointer, so a tap doesn't leave a stuck highlight */
+      @media (hover:hover){
+        .gear:hover{background:${fill};color:${text}}
+        .fx.lk:hover,.evmore:hover,.ring[data-detail]:hover,.spark[data-detail]:hover,details.more summary:hover{background:${hover}}
+        .apps tr[data-detail]:hover td{background:${hover}}
+        .ring:hover .chev{opacity:1;transform:translateX(2px)}
+        .i:hover{color:${text}}
+      }
       @container card (max-width:940px){.facts2{grid-template-columns:repeat(2,minmax(0,1fr))}}
       @container card (max-width:860px){.grid3{grid-template-columns:1fr}.sparks{grid-template-columns:repeat(3,minmax(0,1fr))}.facts{grid-template-columns:repeat(2,minmax(0,1fr))}}
       @container card (max-width:760px){.rings{grid-template-columns:repeat(2,minmax(0,1fr))}}
       @container card (max-width:640px){.hero{grid-template-columns:1fr}}
-      @container card (max-width:520px){.sparks{grid-template-columns:repeat(2,minmax(0,1fr))}.apps td:first-child .sub,.apps .pt,.blurb,.upt{display:none}
-        .apps .pill{padding:0 6px;gap:0}.apps td,.apps th{padding-left:8px}.ring{gap:10px;padding:12px}.ring svg{width:50px;height:50px}.num b{font-size:22px}}
+      @container card (max-width:520px){.sparks{grid-template-columns:repeat(2,minmax(0,1fr))}.apps td:first-child .sub,.apps .pt,.blurb,.upt,.head .tile{display:none}
+        .apps .pill{padding:0 6px;gap:0}.apps td,.apps th{padding-left:8px}.ring{flex-direction:column;align-items:flex-start;gap:8px;padding:12px}.ring svg{width:44px;height:44px}.ring .rt{padding-right:0;width:100%}.num b{font-size:22px}}
     </style><ha-card><div class="head"><div class="hl"></div><button class="gear" aria-label="Settings" aria-haspopup="dialog" aria-expanded="false"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 4.5h6M11.5 4.5h2M2.5 11.5h2M7.5 11.5h6"/><circle cx="10" cy="4.5" r="1.5"/><circle cx="6" cy="11.5" r="1.5"/></svg></button></div><div class="hero"><div class="board"></div><div class="facts2 cells"></div></div><div class="body"></div><div class="menu" role="dialog" aria-label="Settings"></div><div class="tipbox"></div></ha-card>`;
     this.wireTips();
+    const R1 = this.shadowRoot, release = () => {
+      this.pressing = false; this.holdUntil = Date.now() + 400;
+      clearTimeout(this.holdT); this.holdT = setTimeout(() => { if (this.pending) { this.pending = false; this.render(); } }, 420);
+    };
+    R1.addEventListener("pointerdown", e => { this.pressing = true; this.pressT = Date.now(); this.downXY = [e.clientX, e.clientY]; this.dragged = false; }, true);
+    R1.addEventListener("pointermove", e => { if (this.pressing && this.downXY && Math.hypot(e.clientX - this.downXY[0], e.clientY - this.downXY[1]) > 10) this.dragged = true; }, true);
+    R1.addEventListener("pointerup", release, true);
+    R1.addEventListener("pointercancel", release, true);
     const open = el => {
       const [id, title, color, decimals, range, temp] = el.dataset.detail.split("|");
       if (window.shDetailChart) this.modal = window.shDetailChart.open(this._hass, { entity: id, title, icon: "mdi:raspberry-pi", color, decimals: +decimals, range, ...(temp ? { temperature_unit: "pi-vitals" } : {}) });
@@ -562,10 +581,10 @@ class PiVitalsCard extends HTMLElement {
       if (e.target.closest(".gear")) { this.toggleMenu(!this.menuOpen); return; }
       const set = e.target.closest("[data-set]");
       if (set) { const v = set.dataset.v; window.piVitals.save(this._hass, { [set.dataset.set]: v === "true" ? true : v === "false" ? false : v }); return; }
-      if (e.target.closest("[data-evall]")) { this.evAll = !this.evAll; this.render(); return; }
+      if (e.target.closest("[data-evall]")) { this.evAll = !this.evAll; this.render(true); return; }
       const s = e.target.closest("summary"); if (s) { this.moreOpen = !s.parentElement.open; return; }
       const a = e.target.closest("[data-nav]"); if (a) { e.preventDefault(); history.pushState(null, "", a.dataset.nav); window.dispatchEvent(new CustomEvent("location-changed")); return; }
-      const g = e.target.closest("[data-detail]"); if (g && !e.target.closest("[data-tip]")) open(g);
+      const g = e.target.closest("[data-detail]"); if (g && !e.target.closest("[data-tip]") && !this.dragged) open(g);
     });
     this.shadowRoot.addEventListener("keydown", e => { const l = e.target.closest?.(".fx[data-nav]"); if (l && e.key === "Enter") { l.click(); return; } const g = e.target.closest?.("[data-detail]"); if (g && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); open(g); } });
     // sparkline scrub: same cursor line, dot and tooltip as the expanded charts (hover with a mouse, drag with a finger)
@@ -660,8 +679,10 @@ class PiVitalsCard extends HTMLElement {
       <rect class="pt" x="124" y="51" width="14" height="14" rx="1.5"/><text class="lbl" x="131" y="73" text-anchor="middle">RP1</text>
     </svg>`;
   }
-  render() {
+  // force: a redraw the person asked for (Show all, a setting); live data redraws wait while a finger or button is down
+  render(force) {
     if (!this._hass || !this.config) return;
+    if (!force && (this.holdUntil > Date.now() || (this.pressing && Date.now() - this.pressT < 3000))) { this.pending = true; return; }
     const cfg = this.config, C = this.C, H = this._hass.states, R = this.R, S = this.settings(), tUnit = "°" + S.temperature_unit;
     const n = id => this.n(this.S(id)), v = id => this.v(this.S(id));
     const hn = id => { const x = parseFloat(H[id]?.state); return Number.isFinite(x) ? x : null; };
@@ -743,7 +764,7 @@ class PiVitalsCard extends HTMLElement {
     else if (dbm != null) fx.push([dbm > -67 ? C.ok : dbm > -75 ? C.warn : C.bad, "Wi-Fi", dbm > -60 ? "Excellent" : dbm > -70 ? "Good" : dbm > -75 ? "Fair" : "Weak", `${String(dbm).replace("-", "−")} dBm`, "wifi"]);
     this.shadowRoot.querySelector(".hl").innerHTML = `<span class="tile"><ha-icon icon="${isPi ? "mdi:raspberry-pi" : "mdi:server"}"></ha-icon></span>
       <div class="ttl"><span class="title">${model}</span>${up ? `<span class="upt">Up ${up}</span>` : ""}</div>
-      <span class="status"><i class="dot" style="background:${vColor}"></i>${verdict}${this.tip("status")}</span>`;
+      <span class="status"><i class="dot" style="background:${vColor}"></i><span class="vt">${verdict}</span>${this.tip("status")}</span>`;
     const nav = { backup: "/config/backup", updates: "/config/updates" };
     this.shadowRoot.querySelector(".facts2").innerHTML = fx.map(([c, k, val, sub, t]) =>
       `<div class="fx${nav[t] ? " lk" : ""}"${nav[t] ? ` data-nav="${nav[t]}" role="link" tabindex="0"` : ""}><div class="k"><i class="dot" style="background:${c}"></i>${k}${this.tip(t)}</div><div class="val">${val}</div><div class="sub" title="${sub}">${sub || "&nbsp;"}</div></div>`).join("");
