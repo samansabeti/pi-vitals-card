@@ -6,11 +6,12 @@ A Raspberry Pi health dashboard for Home Assistant, in a single card. It's built
 
 - **A live board drawing.** A line-art Pi whose parts light up from real data: the processor takes the temperature color, the cooler spins at the real fan speed, the power LED turns red on under-voltage, the Wi-Fi arcs show signal strength, and the SD slot blinks while the Pi writes to it.
 - **A verdict with its reasons.** "All systems normal" (or the worst problem), plus status facts beside the board: power, throttling, storage, backups, updates, Wi-Fi.
-- **Ring gauges** for CPU, memory, disk and temperature. Tap one for its history.
+- **Ring gauges** for CPU, memory, disk and temperature, each compared with its own 7-day normal ("Usually 4%", or "Above usual" when it's well outside its normal swing). Disk shows when it would be full at its typical daily growth. Tap one for its history.
 - **Live sparklines** covering the last 10 minutes. Hover (or drag on a phone) to read any moment.
-- **Storage wear.** Disk use, database size and daily growth, data written since boot, and the write rate now.
+- **Storage wear.** Disk use, a disk-full forecast, database size and daily growth, data written since boot, and the write rate now.
 - **Power & performance.** Throttle flags (now and since boot), measured CPU clock, fan speed, Wi-Fi signal.
-- **Backups, updates and apps.** Only pending updates are listed, plus each app's CPU and RAM.
+- **Backups, updates and apps.** Only pending updates are listed, plus each app's CPU and RAM. The Backups and Updates facts open those Settings pages.
+- **Recent events** from the last 7 days: Pi reboots, Home Assistant restarts, throttling and power dips, failed backups (successful ones collapse into one row), apps stopping or restarting, and installed updates.
 - **More details** (collapsed): RAM and swap, load average, stall pressure, network counters, platform versions.
 - **Settings** (the sliders button in the header): °F or °C, show or hide the ⓘ explanations, show or hide the Apps table. Saved to each person's Home Assistant profile, so they follow you to every device.
 
@@ -51,7 +52,7 @@ command_line:
       unique_id: pi_board_power
       command: "python3 /config/pi_power/pi_vitals.py"
       value_template: "{{ value_json.watts }}"
-      json_attributes: [rails, model, throttled, arm_mhz, wifi_dbm, wifi_iface, disk_device, disk_written_gb, disk_write_kbs, db_mb, db_mb_per_day]
+      json_attributes: [rails, model, throttled, arm_mhz, wifi_dbm, wifi_iface, disk_device, disk_written_gb, disk_write_kbs, db_mb, db_mb_per_day, throttle_events]
       unit_of_measurement: W
       device_class: power
       state_class: measurement

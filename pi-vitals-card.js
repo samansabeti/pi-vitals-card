@@ -48,6 +48,9 @@ const PV_TIPS = {
   updates: "Components with a newer version waiting. Install them from Settings → Updates.",
   ha_stats: "What Home Assistant tracks: entities (every sensor, light and switch), automations and scripts.",
   backup: "Home Assistant's automatic backups: when the last one finished and when the next is due.",
+  forecast: "When the disk would be full if it keeps growing at its typical daily pace (the median day-to-day change over the last two weeks, so one big install or cleanup doesn't skew it).",
+  usual: "Compared with this sensor's average over the past 7 days. Flagged when it's well outside its normal swing.",
+  events: "Reboots, Home Assistant restarts, throttling and power dips, failed backups, app stops and installed updates from the last 7 days.",
   b_soc: "The processor (BCM2712 on a Pi 5). Its outline takes the temperature color.",
   b_fan: "The cooler. It spins here when the real fan is running, faster with higher rpm.",
   b_led: "Power LED: green when the supply is steady, red on under-voltage.",
@@ -258,6 +261,7 @@ class PiVitalsCard extends HTMLElement {
       }
       if (this.buf[id]) this.buf[id] = this.buf[id].filter((p, i, a) => p[0] >= now - PV_WINDOW || (a[i + 1] && a[i + 1][0] >= now - PV_WINDOW));
     }
+    if (this.R.hasSM && now - (this.histT || 0) > 5 * 60e3) { this.histT = now; this.loadHistory(); }
     const W = this.R.watch, ids = Object.keys(h.states).filter(k => k.startsWith("update.") || W.has(k) || (!this.R.hasSM && k.startsWith(this.P)));
     const sig = ids.map(k => h.states[k].last_updated).join() + ids.length;
     if (sig !== this.sig) { this.sig = sig; this.render(); }
@@ -272,6 +276,101 @@ class PiVitalsCard extends HTMLElement {
       }
       this.render();
     } catch (e) { /* live points still accumulate */ }
+  }
+  // Past data for the trend features: 7-day hourly means (the "usual" lines), 15 days of daily disk use (the forecast),
+  // and 7 days of history for the event timeline. Refreshed every 5 minutes; failures just hide those lines.
+  async loadHistory() {
+    const H = this._hass, R = this.R, now = Date.now(), day = 864e5, ws = m => H.callWS(m).catch(() => ({}));
+    const ok = id => id && H.states[id], id = { cpu: this.S("processor_use"), mem: this.S("memory_usage"), temp: this.S("processor_temperature"), disk: this.S("disk_use") };
+    const hourly = ["cpu", "mem", "temp"].map(k => id[k]).filter(ok);
+    const boot = this.S("last_boot"), bEv = R.backup.automatic_backup_event;
+    const plain = [R.power, ...R.apps.map(a => a.running)].filter(ok), rich = [boot, bEv, ...Object.keys(H.states).filter(k => k.startsWith("update."))].filter(ok);
+    const hist = (ids, attrs) => ids.length ? ws({ type: "history/history_during_period", start_time: new Date(now - 7 * day).toISOString(), entity_ids: ids, minimal_response: !attrs, no_attributes: !attrs, significant_changes_only: false }) : {};
+    const [hr, dy, a, b] = await Promise.all([
+      hourly.length ? ws({ type: "recorder/statistics_during_period", start_time: new Date(now - 7 * day).toISOString(), end_time: new Date(now - 36e5).toISOString(), statistic_ids: hourly, period: "hour", types: ["mean"] }) : {},
+      ok(id.disk) ? ws({ type: "recorder/statistics_during_period", start_time: new Date(now - 16 * day).toISOString(), statistic_ids: [id.disk], period: "day", types: ["mean"] }) : {},
+      hist(plain, false), hist(rich, true)]);
+    // usual: mean and spread of the hourly means
+    const norm = {};
+    for (const k of ["cpu", "mem", "temp"]) {
+      const xs = (hr[id[k]] || []).map(p => p.mean).filter(Number.isFinite);
+      if (xs.length < 24) continue;
+      const mu = xs.reduce((x, y) => x + y, 0) / xs.length;
+      norm[k] = { mu, sd: Math.sqrt(xs.reduce((x, y) => x + (y - mu) ** 2, 0) / xs.length) };
+    }
+    // forecast: median daily change of complete days (robust to a one-off install, restore or cleanup)
+    const midnight = new Date().setHours(0, 0, 0, 0);
+    const d = (dy[id.disk] || []).filter(p => new Date(p.start) < midnight && Number.isFinite(p.mean)).map(p => p.mean);
+    const diffs = d.slice(1).map((x, i) => x - d[i]).sort((x, y) => x - y), m = diffs.length >> 1;
+    const slope = diffs.length >= 5 ? (diffs.length % 2 ? diffs[m] : (diffs[m - 1] + diffs[m]) / 2) : null;
+    this.trend = { norm, slope };
+    this.events = this.buildEvents(a, b, now - 7 * day, boot, bEv);
+    this.render();
+  }
+  buildEvents(a, b, start, boot, bEv) {
+    const H = this._hass, R = this.R, ev = [], t = p => (p.lu ?? p.lc) * 1000, dead = s => s == null || s === "unavailable" || s === "unknown";
+    const push = (time, color, text, sub = "") => ev.push({ t: time, color, text, sub });
+    // last boot (full rows: a minimal response drops repeats): a new value is a Pi reboot; the same value written again is Home Assistant starting
+    let prev = null;
+    for (const p of b[boot] || []) {
+      if (dead(p.s)) continue;
+      const bt = new Date(p.s).getTime();
+      if (prev != null && p.s !== prev) push(bt || t(p), "warn", "Pi rebooted");
+      else if (prev != null && !ev.some(e => Math.abs(e.t - t(p)) < 10 * 60e3)) push(t(p), "neutral", "Home Assistant restarted");
+      prev = p.s;
+    }
+    // throttling and power dips: pi_vitals keeps its own log; otherwise the Raspberry Pi power checker
+    const tev = H.states[R.vitals]?.attributes?.throttle_events;
+    const fname = { under_voltage: "Power dipped (under-voltage)", freq_capped: "CPU speed capped", throttled: "CPU throttled", soft_temp_limit: "Soft temperature limit hit" };
+    if (Array.isArray(tev)) {
+      const open = {};
+      for (const [s, f, kind] of tev) {
+        if (s * 1000 < start) continue;
+        if (kind === "start") open[f] = push(s * 1000, "bad", fname[f] || f, "Ongoing") - 1;
+        else if (kind === "end" && open[f] != null) { const e = ev[open[f]]; e.sub = "Lasted " + this.dur(s * 1000 - e.t); delete open[f]; }
+        else if (kind === "brief") push(s * 1000, "warn", fname[f] || f, "Briefly, between checks");
+      }
+    } else {
+      let on = null;
+      for (const p of a[R.power] || []) {
+        if (p.s === "on" && on == null) on = push(t(p), "bad", fname.under_voltage, "Ongoing") - 1;
+        else if (p.s === "off" && on != null) { ev[on].sub = "Lasted " + this.dur(t(p) - ev[on].t); on = null; }
+      }
+    }
+    // apps: stopped / started, a stop and start within 5 minutes is a restart
+    for (const app of R.apps) {
+      let last = null;
+      for (const p of a[app.running] || []) {
+        if (dead(p.s)) continue;
+        if (last && p.s !== last.s) {
+          const prevStop = p.s === "on" && ev.length && ev[ev.length - 1].app === app.name && t(p) - ev[ev.length - 1].t < 5 * 60e3 ? ev[ev.length - 1] : null;
+          if (prevStop) Object.assign(prevStop, { text: `${app.name} restarted`, color: "neutral" });
+          else ev.push({ t: t(p), color: p.s === "on" ? "neutral" : "warn", text: `${app.name} ${p.s === "on" ? "started" : "stopped"}`, sub: "", app: app.name });
+        }
+        last = p;
+      }
+    }
+    // backups: failures one by one, successes as one summary row
+    const seen = new Set(), done = [];
+    for (const p of b[bEv] || []) {
+      const et = p.a?.event_type, at = new Date(p.s).getTime();
+      if (dead(p.s) || seen.has(p.s) || !at || at < start) continue;
+      seen.add(p.s);
+      if (et === "failed") push(at, "bad", "Automatic backup failed", p.a?.failed_reason || "");
+      else if (et === "completed") done.push(at);
+    }
+    if (done.length) push(Math.max(...done), "ok", done.length === 1 ? "Backup completed" : `${done.length} backups completed`, done.length > 1 ? "time of the latest" : "");
+    // updates: installed_version changing
+    for (const [eid, rows] of Object.entries(b)) {
+      if (!eid.startsWith("update.")) continue;
+      let v = null;
+      for (const p of rows) {
+        const iv = p.a?.installed_version;
+        if (iv && v && iv !== v) push(t(p), "accent", `Updated ${p.a.title || (p.a.friendly_name || eid).replace(/ update$/i, "")}`, `${v} → ${iv}`);
+        if (iv) v = iv;
+      }
+    }
+    return ev.sort((x, y) => y.t - x.t);
   }
   build() {
     this.built = true;
@@ -328,6 +427,17 @@ class PiVitalsCard extends HTMLElement {
       .fx{padding:12px 14px}
       .fx .val{font-size:14px;font-weight:600;margin-top:6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-variant-numeric:tabular-nums}
       .fx .sub{margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+      .fx.lk{cursor:pointer;transition:background .12s}.fx.lk:hover{background:${hover}}.fx.lk:focus-visible{outline:2px solid ${accent};outline-offset:-2px}
+      .nrm{font-size:12px;color:${text3};margin-top:1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-variant-numeric:tabular-nums}
+      .evs{margin:0 -14px}
+      .ev{display:flex;align-items:center;gap:10px;min-height:40px;box-sizing:border-box;padding:8px 14px;border-top:1px solid ${line}}
+      .evs .ev:first-child{border-top:0}
+      .ev .et{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+      .ev .x{color:${text3}}
+      .ev .ew{flex:none;font-size:12px;color:${text3};font-variant-numeric:tabular-nums}
+      .ev.quiet{border:0;padding:12px 0;color:${text3}}
+      .evmore{display:block;width:100%;height:36px;border:0;border-top:1px solid ${line};background:none;cursor:pointer;font-size:12px;font-weight:500;color:${text2};transition:background .12s}
+      .evmore:hover{background:${hover}}
       /* rings */
       .rings{grid-template-columns:repeat(4,minmax(0,1fr))}
       .ring{position:relative;display:flex;align-items:center;gap:12px;padding:14px}
@@ -449,11 +559,12 @@ class PiVitalsCard extends HTMLElement {
       if (e.target.closest(".gear")) { this.toggleMenu(!this.menuOpen); return; }
       const set = e.target.closest("[data-set]");
       if (set) { const v = set.dataset.v; window.piVitals.save(this._hass, { [set.dataset.set]: v === "true" ? true : v === "false" ? false : v }); return; }
+      if (e.target.closest("[data-evall]")) { this.evAll = !this.evAll; this.render(); return; }
       const s = e.target.closest("summary"); if (s) { this.moreOpen = !s.parentElement.open; return; }
       const a = e.target.closest("[data-nav]"); if (a) { e.preventDefault(); history.pushState(null, "", a.dataset.nav); window.dispatchEvent(new CustomEvent("location-changed")); return; }
       const g = e.target.closest("[data-detail]"); if (g && !e.target.closest("[data-tip]")) open(g);
     });
-    this.shadowRoot.addEventListener("keydown", e => { const g = e.target.closest?.("[data-detail]"); if (g && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); open(g); } });
+    this.shadowRoot.addEventListener("keydown", e => { const l = e.target.closest?.(".fx[data-nav]"); if (l && e.key === "Enter") { l.click(); return; } const g = e.target.closest?.("[data-detail]"); if (g && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); open(g); } });
     // sparkline scrub: same cursor line, dot and tooltip as the expanded charts (hover with a mouse, drag with a finger)
     const R0 = this.shadowRoot, svAt = e => e.target.closest?.(".sv");
     const move = e => { const sv = svAt(e); if (!sv || (e.pointerType !== "mouse" && !this.sDown)) return; const rc = sv.getBoundingClientRect(); this.sh = { id: sv.dataset.id, f: Math.max(0, Math.min(1, (e.clientX - rc.left) / rc.width)) }; this.scrubSpark(); };
@@ -581,8 +692,23 @@ class PiVitalsCard extends HTMLElement {
     const dbm = VA.wifi_dbm, wifiBars = wired || dbm == null ? null : dbm > -60 ? 3 : dbm > -70 ? 2 : 1;
     const devKind = d => !d ? null : /^mmcblk/.test(d) ? "SD card" : /^nvme/.test(d) ? "NVMe SSD" : "USB drive";
 
+    // trends: disk forecast and "usual" comparisons (from loadHistory)
+    const T = this.trend || { norm: {} }, slope = T.slope;
+    const daysLeft = slope != null && dFree != null && slope > 0.02 ? dFree / slope : null;
+    const fullIn = d => d < 14 ? `${Math.max(1, Math.round(d))} days` : d < 60 ? `${Math.round(d / 7)} weeks` : d < 730 ? `${Math.round(d / 30.4)} months` : "years";
+    const forecast = slope == null ? null : daysLeft == null ? "Not filling up" : `Full in ~${fullIn(daysLeft)}`;
+    const fColor = daysLeft == null ? null : daysLeft < 7 ? C.bad : daysLeft < 30 ? C.warn : null;
+    const usual = (k, x, min, show) => {
+      const u = T.norm[k]; if (!u || x == null) return "";
+      const mu = k === "temp" && isF ? (u.mu - 32) * 5 / 9 : u.mu, sd = k === "temp" && isF ? u.sd * 5 / 9 : u.sd, gap = Math.max(1.5 * sd, min);
+      const hi = x - mu > gap, lo = mu - x > gap;
+      return `<div class="nrm"${hi ? ` style="color:${C.warn}"` : ""}>${hi ? "Above usual · " : lo ? "Below usual · " : "Usually "}${show(mu)}</div>`;
+    };
+
     // verdict: worst issue wins
     const issues = [];
+    if (daysLeft != null && daysLeft < 7) issues.push([2, "Disk nearly full"]);
+    else if (daysLeft != null && daysLeft < 30) issues.push([1, "Disk filling up"]);
     if (uvNow) issues.push([2, "Power supply problem"]);
     if (slowNow) issues.push([2, "Throttling right now"]);
     if (tC != null && tC >= cfg.temp_bad_c) issues.push([2, "Running too hot"]);
@@ -615,18 +741,19 @@ class PiVitalsCard extends HTMLElement {
     this.shadowRoot.querySelector(".hl").innerHTML = `<span class="tile"><ha-icon icon="${isPi ? "mdi:raspberry-pi" : "mdi:server"}"></ha-icon></span>
       <div class="ttl"><span class="title">${model}</span>${up ? `<span class="upt">Up ${up}</span>` : ""}</div>
       <span class="status"><i class="dot" style="background:${vColor}"></i>${verdict}${this.tip("status")}</span>`;
+    const nav = { backup: "/config/backup", updates: "/config/updates" };
     this.shadowRoot.querySelector(".facts2").innerHTML = fx.map(([c, k, val, sub, t]) =>
-      `<div class="fx"><div class="k"><i class="dot" style="background:${c}"></i>${k}${this.tip(t)}</div><div class="val">${val}</div><div class="sub" title="${sub}">${sub || "&nbsp;"}</div></div>`).join("");
+      `<div class="fx${nav[t] ? " lk" : ""}"${nav[t] ? ` data-nav="${nav[t]}" role="link" tabindex="0"` : ""}><div class="k"><i class="dot" style="background:${c}"></i>${k}${this.tip(t)}</div><div class="val">${val}</div><div class="sub" title="${sub}">${sub || "&nbsp;"}</div></div>`).join("");
 
     // gauges
     const gauges = [
-      ["CPU", "cpu", cpu == null ? "—" : Math.round(cpu), "%", cpu, busy(cpu, 60, 85) || C.accent, l1 != null ? `Load ${l1.toFixed(2)}` : `${cores} cores`, `${this.S("processor_use")}|CPU|infra|0|6H`],
-      ["Memory", "mem", mem == null ? "—" : Math.round(mem), "%", mem, busy(mem, 70, 90) || C.accent, memTot ? `${gb(memUse)} of ${gb(memTot)} GB` : "", `${this.S("memory_usage")}|Memory|infra|0|6H`],
-      ["Disk", "disk", disk == null ? "—" : Math.round(disk), "%", disk, busy(disk, 75, 90) || C.accent, dTot ? `${dUse.toFixed(1)} of ${dTot.toFixed(0)} GB` : "", `${this.S("disk_usage")}|Disk|infra|1|7D`],
-      ["Temperature", "temp", tC == null ? "—" : Math.round(this.tC2D(tC)), tUnit, tC == null ? 0 : tC / 85 * 100, tempColor, fan == null ? "" : fan ? `Fan ${Math.round(fan).toLocaleString()} rpm` : "Fan idle", `${this.S("processor_temperature")}|CPU temperature|climate|1|1H|t`],
+      ["CPU", "cpu", cpu == null ? "—" : Math.round(cpu), "%", cpu, busy(cpu, 60, 85) || C.accent, l1 != null ? `Load ${l1.toFixed(2)}` : `${cores} cores`, `${this.S("processor_use")}|CPU|infra|0|6H`, usual("cpu", cpu, 3, x => Math.round(x) + "%")],
+      ["Memory", "mem", mem == null ? "—" : Math.round(mem), "%", mem, busy(mem, 70, 90) || C.accent, memTot ? `${gb(memUse)} of ${gb(memTot)} GB` : "", `${this.S("memory_usage")}|Memory|infra|0|6H`, usual("mem", mem, 3, x => Math.round(x) + "%")],
+      ["Disk", "disk", disk == null ? "—" : Math.round(disk), "%", disk, busy(disk, 75, 90) || C.accent, dTot ? `${dUse.toFixed(1)} of ${dTot.toFixed(0)} GB` : "", `${this.S("disk_usage")}|Disk|infra|1|7D`, forecast ? `<div class="nrm"${fColor ? ` style="color:${fColor}"` : ""}>${forecast}</div>` : ""],
+      ["Temperature", "temp", tC == null ? "—" : Math.round(this.tC2D(tC)), tUnit, tC == null ? 0 : tC / 85 * 100, tempColor, fan == null ? "" : fan ? `Fan ${Math.round(fan).toLocaleString()} rpm` : "Fan idle", `${this.S("processor_temperature")}|CPU temperature|climate|1|1H|t`, usual("temp", tC, 2, x => Math.round(this.tC2D(x)) + tUnit)],
     ];
-    const gaugesHtml = gauges.filter(g => H[g[7].split("|")[0]]).map(([name, t, val, u, pct, col, sub, det]) => `<div class="ring" data-detail="${det}" role="button" tabindex="0" aria-label="Open ${name} history">${this.ring(pct, col)}
-      <div class="rt"><div class="k">${name}${this.tip(t)}</div><div class="num"><b>${val}</b><span>${u}</span></div><div class="sub">${sub || "&nbsp;"}</div></div><svg class="chev" viewBox="0 0 16 16" aria-hidden="true"><path d="M6.5 4l4 4-4 4"/></svg></div>`).join("");
+    const gaugesHtml = gauges.filter(g => H[g[7].split("|")[0]]).map(([name, t, val, u, pct, col, sub, det, nrm]) => `<div class="ring" data-detail="${det}" role="button" tabindex="0" aria-label="Open ${name} history">${this.ring(pct, col)}
+      <div class="rt"><div class="k">${name}${this.tip(t)}</div><div class="num"><b>${val}</b><span>${u}</span></div><div class="sub">${sub || "&nbsp;"}</div>${nrm}</div><svg class="chev" viewBox="0 0 16 16" aria-hidden="true"><path d="M6.5 4l4 4-4 4"/></svg></div>`).join("");
 
     // sparks
     const fmt = (x, u) => x == null ? "—" : u === "MB/s" ? (x < 1 ? (x * 1000).toFixed(0) : x.toFixed(1)) : u === "W" ? x.toFixed(2) : /°/.test(u) ? x.toFixed(0) : u === "" ? x.toFixed(2) : Math.round(x);
@@ -649,6 +776,7 @@ class PiVitalsCard extends HTMLElement {
       <div class="row"><div class="rowh"><span>Disk${this.tip("storage")}</span><span><b>${dUse != null ? dUse.toFixed(1) : "—"} GB</b> used · ${dFree != null ? dFree.toFixed(1) : "—"} free</span></div>
         <div class="bar"><span style="width:${disk ?? 0}%;background:${busy(disk, 80, 90) || C.accent}"></span></div></div>
       <div class="kvs">
+        ${forecast ? kvr("Forecast", `${daysLeft == null ? forecast : `<span${fColor ? ` style="color:${fColor}"` : ""}>${forecast}</span>`} <span class="x">· ${slope >= 0 ? "+" : "−"}${Math.abs(slope).toFixed(2)} GB/day</span>`, "forecast") : ""}
         ${VA.db_mb != null ? kvr("Database", `${mb(VA.db_mb)} <span class="x">· ${VA.db_mb_per_day != null ? (VA.db_mb_per_day >= 0 ? "+" : "−") + Math.abs(VA.db_mb_per_day) + " MB/day" : "growth after 1 day"}</span>`, "db") : ""}
         ${VA.disk_written_gb != null ? kvr("Written since boot", `${VA.disk_written_gb} GB`, "writes") : ""}
         ${VA.disk_write_kbs != null ? kvr("Writing now", `${VA.disk_write_kbs} kB/s`) : ""}
@@ -669,6 +797,16 @@ class PiVitalsCard extends HTMLElement {
       ${pendingU.length ? pendingU.map(u => kvr((u.attributes.friendly_name || u.entity_id).replace(/ update$/i, ""), `<span class="x">${u.attributes.installed_version ?? ""} →</span> <span class="pill upd">${u.attributes.latest_version}</span>`)).join("")
         : kvr("Updates", `<span class="pill on">All ${updates.length} current</span>`, "updates")}
     </div>`, pendingU.length ? `${pendingU.length} pending` : "");
+
+    // recent events
+    const EV = this.events, evCol = { ok: C.ok, warn: C.warn, bad: C.bad, neutral: C.neutral, accent: C.accent };
+    const when = ms => { const d = new Date(ms), t0 = new Date().setHours(0, 0, 0, 0), tm = d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+      return ms >= t0 ? tm : ms >= t0 - 864e5 ? "Yesterday " + tm : d.toLocaleDateString([], { weekday: "short" }) + " " + tm; };
+    const evShown = EV ? (this.evAll ? EV : EV.slice(0, 6)) : [];
+    const eventsHtml = !EV ? "" : panel("Recent events", EV.length ? `<div class="evs">${evShown.map(e => `<div class="ev"><i class="dot" style="background:${evCol[e.color]}"></i>
+        <span class="et">${e.text}${e.sub ? `<span class="x"> · ${e.sub}</span>` : ""}</span><span class="ew">${when(e.t)}</span></div>`).join("")}
+        ${EV.length > 6 ? `<button class="evmore" data-evall>${this.evAll ? "Show fewer" : `Show all ${EV.length}`}</button>` : ""}</div>`
+      : `<div class="ev quiet">A quiet week: no reboots, restarts or problems.</div>`, "Last 7 days", "events");
 
     // apps
     const pct1 = x => x == null ? "—" : (x < 10 ? x.toFixed(1) : Math.round(x)) + "%";
@@ -738,6 +876,7 @@ class PiVitalsCard extends HTMLElement {
       <div class="rings cells">${gaugesHtml}</div>
       <div class="panel"><div class="ph"><span class="pulse"></span><b>Live</b>${this.tip("live")}<span class="m">Last 10 minutes</span></div><div class="sparks">${sparks}</div></div>
       <div class="grid3">${storage}${perf}${care}</div>
+      ${eventsHtml}
       ${appsHtml}
       ${more}`;
     if (this.tipEl) { const el = this.shadowRoot.querySelector(`[data-tip="${this.tipEl.dataset.tip}"]`); if (el) this.tipEl = el; }

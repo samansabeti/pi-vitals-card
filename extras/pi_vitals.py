@@ -7,6 +7,8 @@ Prints one JSON object; the sensor's state is `watts`, everything else becomes a
   leaves out USB devices and PMIC conversion losses: a floor, not wall-plug draw. Pi 5 only.
 - model: board name from the device tree ("Raspberry Pi 5 Model B Rev 1.0").
 - throttled: `vcgencmd get_throttled` bits, decoded into now / since-boot flags.
+- throttle_events: last 7 days of flag changes as [epoch, flag, "start" | "end" | "brief"]. "brief" = a since-boot
+  flag appeared between two runs without being seen live. Lets a dashboard show episodes without attribute history.
 - arm_mhz: measured CPU clock.
 - wifi_dbm: signal from /proc/net/wireless (HA core uses the host network).
 - disk_*: block-device writes since boot and the write rate since the last run.
@@ -59,6 +61,25 @@ def throttled():
                           "since_boot": [n for b, n in FLAGS.items() if bits >> (b + 16) & 1]}}
 
 
+def throttle_events(result, state, now):
+    thr = result.get("throttled")
+    if not thr:
+        return {}
+    try:
+        boot = open("/proc/sys/kernel/random/boot_id").read().strip()
+    except OSError:
+        boot = ""
+    prev = state.get("thr")
+    log = [e for e in state.get("thr_log", []) if e[0] > now - 7 * 86400][-40:]
+    if prev and prev.get("boot") == boot:
+        pn, pb, n, b = set(prev["now"]), set(prev["since_boot"]), set(thr["now"]), set(thr["since_boot"])
+        log += [[round(now), f, "start"] for f in sorted(n - pn)] + [[round(now), f, "end"] for f in sorted(pn - n)]
+        log += [[round(now), f, "brief"] for f in sorted(b - pb - n - pn)]
+    state["thr"] = {"boot": boot, "now": thr["now"], "since_boot": thr["since_boot"]}
+    state["thr_log"] = log
+    return {"throttle_events": log}
+
+
 def clock():
     return {"arm_mhz": round(int(gencmd("measure_clock arm").split("=")[1]) / 1e6)}
 
@@ -108,7 +129,7 @@ try:
 except (OSError, ValueError):
     state = {}
 result = {}
-for part in (model, power, throttled, clock, wifi, lambda: disk(state, now), lambda: database(state, now)):
+for part in (model, power, throttled, lambda: throttle_events(result, state, now), clock, wifi, lambda: disk(state, now), lambda: database(state, now)):
     try:
         result.update(part())
     except Exception:  # noqa: BLE001 - a missing source just drops that field
