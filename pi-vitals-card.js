@@ -73,12 +73,61 @@ window.piVitals = window.piVitals || {
 
 class PiVitalsCard extends HTMLElement {
   static getStubConfig() { return {}; }
+  // Visual editor (Edit dashboard → card). Everything is optional; blank fields use the defaults or auto-detection.
+  static getConfigForm() {
+    const num = (min, max, step = 1, unit) => ({ number: { min, max, step, mode: "box", ...(unit ? { unit_of_measurement: unit } : {}) } });
+    const L = {
+      title: "Title", temperature_unit: "Temperature unit", show_apps: "Show the Apps table", backup_note: "Backup note", footer: "Footer note",
+      vitals_entity: "Pi vitals sensor", power_status_entity: "Power supply sensor", interface: "Network interface", prefix: "Entity ID prefix (legacy)",
+      temp_warn_c: "Warm from", temp_bad_c: "Hot from", backup_stale_days: "Backups overdue after", cores: "CPU cores", fan_max_rpm: "Fan full speed",
+    };
+    const H = {
+      title: "Blank shows the board model.", temperature_unit: "Blank follows your Home Assistant unit system. Each person can still switch in the card's Settings.",
+      backup_note: "Added to the backup explanation, e.g. \"Also copied to my NAS.\"", footer: "Small note at the bottom of More details.",
+      vitals_entity: "The optional pi_vitals.py sensor. Found automatically when blank.", power_status_entity: "Raspberry Pi Power Supply Checker. Found automatically when blank.",
+      interface: "e.g. wlan0, eth0 or end0. Blank picks it automatically.", prefix: "Only if sensors are found wrongly: forces lookup by English entity IDs (e.g. sensor.system_monitor_).",
+      temp_warn_c: "Temperature thresholds are in °C whatever unit the card shows.", fan_max_rpm: "Used for the fan % (8000 for the Pi 5 Active Cooler).", cores: "Used for load %.",
+    };
+    return {
+      schema: [
+        { name: "title", selector: { text: {} } },
+        { type: "grid", name: "", schema: [
+          { name: "temperature_unit", selector: { select: { mode: "dropdown", options: [{ value: "F", label: "°F" }, { value: "C", label: "°C" }] } } },
+          { name: "show_apps", default: true, selector: { boolean: {} } },
+        ] },
+        { type: "expandable", name: "", title: "Thresholds", icon: "mdi:thermometer-alert", schema: [
+          { type: "grid", name: "", schema: [
+            { name: "temp_warn_c", default: PV_DEFAULTS.temp_warn_c, selector: num(40, 90, 1, "°C") },
+            { name: "temp_bad_c", default: PV_DEFAULTS.temp_bad_c, selector: num(50, 95, 1, "°C") },
+            { name: "backup_stale_days", default: PV_DEFAULTS.backup_stale_days, selector: num(1, 30, 1, "days") },
+          ] },
+        ] },
+        { type: "expandable", name: "", title: "Sensors", icon: "mdi:chip", schema: [
+          { name: "vitals_entity", selector: { entity: { domain: "sensor" } } },
+          { name: "power_status_entity", selector: { entity: { domain: "binary_sensor" } } },
+          { type: "grid", name: "", schema: [
+            { name: "interface", selector: { text: {} } },
+            { name: "cores", default: PV_DEFAULTS.cores, selector: num(1, 16) },
+            { name: "fan_max_rpm", default: PV_DEFAULTS.fan_max_rpm, selector: num(1000, 20000, 100, "rpm") },
+          ] },
+          { name: "prefix", selector: { text: {} } },
+        ] },
+        { type: "expandable", name: "", title: "Notes", icon: "mdi:note-text-outline", schema: [
+          { name: "backup_note", selector: { text: {} } },
+          { name: "footer", selector: { text: { multiline: true } } },
+        ] },
+      ],
+      computeLabel: s => L[s.name],
+      computeHelper: s => H[s.name],
+    };
+  }
   constructor() { super(); this.attachShadow({ mode: "open" }); this.buf = {}; this.seen = {}; this.sig = ""; this.boardSig = ""; this.built = false; }
   setConfig(c) {
     this.config = { ...PV_DEFAULTS, ...(c || {}) };
     this.legacy = !!this.config.prefix;
     this.P = this.config.prefix || "sensor.system_monitor_";
     this.R = null;
+    if (this._hass && this.built) { this.sig = ""; this.boardSig = ""; this.sparkKey = null; this.hass = this._hass; }
   }
   connectedCallback() {
     this.onSet = () => { this.render(); this.renderMenu(); };

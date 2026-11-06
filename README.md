@@ -62,7 +62,7 @@ Board power is the sum of the PMIC's own rails. It leaves out USB devices and su
 
 ## Options
 
-All optional.
+All optional. Set them in the visual editor (Edit dashboard → the card), grouped as Thresholds, Sensors and Notes, or in YAML:
 
 | Option | Default | |
 |---|---|---|
