@@ -27,7 +27,7 @@ const PV_TIPS = {
   disk: "Space used on the boot disk. It holds HA, its history database and backups. Keep it under ~80% so updates and backups have room.",
   temp: "CPU temperature. A Pi 5 idles around {40-55}. The fan ramps from ~{50}, and at {80} the firmware slows the chip to cool it ('throttling').",
   power_g: "Board power from the PMIC's own rails, every 30 s. It leaves out USB devices and supply losses, so wall draw is a bit higher.",
-  live: "Live readings over the last 10 minutes. Lines step when a sensor reports a new value.",
+  live: "Live readings over the last 10 minutes. Lines step when a sensor reports a new value. Click one for its longer history.",
   net: "Data moving over the Pi's network link. Down is arriving, up is sent. HA is chatty but small: a few KB/s is normal; bursts come from updates, backups and cameras.",
   ram: "Used is memory apps hold. Free includes cache Linux will hand back instantly.",
   swap: "Overflow memory on disk, much slower than RAM. 0 is ideal; steady use means RAM is tight.",
@@ -44,7 +44,7 @@ const PV_TIPS = {
   clock: "Measured CPU clock. It drops when idle and when throttled. Pi 5 tops out at 2,400 MHz, Pi 4 at 1,500–1,800.",
   wifi: "Wi-Fi signal at the Pi. Above −60 dBm is excellent, down to −70 is fine, below −75 expect dropouts. Ethernet is still the most reliable link for a hub.",
   ha: "Versions of Home Assistant OS and its host components.",
-  apps: "Apps (formerly add-ons) run alongside Home Assistant. Each shows whether it's running, its version, and CPU and RAM as a share of the whole Pi.",
+  apps: "Apps (formerly add-ons) run alongside Home Assistant. Each shows whether it's running, its version, and CPU and RAM as a share of the whole Pi. Click a row for its CPU history.",
   updates: "Components with a newer version waiting. Install them from Settings → Updates.",
   ha_stats: "What Home Assistant tracks: entities (every sensor, light and switch), automations and scripts.",
   backup: "Home Assistant's automatic backups: when the last one finished and when the next is due.",
@@ -465,6 +465,9 @@ class PiVitalsCard extends HTMLElement {
       @media (prefers-reduced-motion:reduce){.board .fan,.board .sd.on,.pulse{animation:none}}
       .sparks{display:grid;grid-template-columns:repeat(6,minmax(0,1fr))}
       .spark{padding:12px 14px}
+      .spark[data-detail]{cursor:pointer;transition:background .12s}.spark[data-detail]:hover{background:${hover}}
+      .spark:focus-visible,.apps tr:focus-visible{outline:2px solid ${accent};outline-offset:-2px}
+      .apps tr[data-detail]{cursor:pointer}
       .spark .num{margin-top:6px}.spark .num b{font-size:18px;letter-spacing:-0.015em}
       .spark .lbl{display:flex;align-items:center;gap:6px;font-size:12px;font-weight:500;color:${text2};white-space:nowrap;overflow:hidden}
       .spark .lbl .dot{width:6px;height:6px}
@@ -763,7 +766,8 @@ class PiVitalsCard extends HTMLElement {
     const sparks = this.sparkDefs().map(([key, id, name, u]) => {
       const x = this.n(id), col = key === "temp" ? C.climate : C.accent, temp = key === "temp";
       this.sfmt[id] = y => temp ? fmt(toD(y), tUnit) : fmt(y, u); this.sunit[id] = y => temp ? tUnit : unit(y, u);
-      return `<div class="spark"><div class="lbl"><i class="dot" style="background:${col}"></i>${name}${key === "down" ? this.tip("net") : ""}</div>
+      const dec = { cpu: 0, mem: 0, temp: 1, power: 2, load: 2, down: 3, up: 3 }[key];
+      return `<div class="spark" data-detail="${id}|${name}|${temp ? "climate" : "infra"}|${dec}|6H${temp ? "|t" : ""}" role="button" tabindex="0" aria-label="Open ${name} history"><div class="lbl"><i class="dot" style="background:${col}"></i>${name}${key === "down" ? this.tip("net") : ""}</div>
       <div class="num"><b>${this.sfmt[id](x)}</b><span>${this.sunit[id](x)}</span></div>
       <div class="sv" data-id="${id}" data-c="${col}">${this.spark(id, col)}<div class="scur"></div><div class="sdot"></div><div class="stip"></div></div></div>`; }).join("");
 
@@ -816,9 +820,9 @@ class PiVitalsCard extends HTMLElement {
     const appsHtml = !S.apps || !(sys.length || R.apps.length) ? "" : panel("Apps", `
       <table class="apps"><tr><th>Name</th><th>Status</th><th>CPU</th><th>RAM</th><th>Version</th></tr>
         ${sys.map(([nm, d]) =>
-          `<tr><td>${nm}<span class="sub">System</span></td><td><span class="pill on"><span class="pt">Running</span></span></td><td>${pct1(hn(d.cpu_percent))}</td><td>${pct1(hn(d.memory_percent))}</td><td>${ver(d.update)}</td></tr>`).join("")}
+          `<tr${d.cpu_percent ? ` data-detail="${d.cpu_percent}|${nm} CPU|infra|1|24H" tabindex="0"` : ""}><td>${nm}<span class="sub">System</span></td><td><span class="pill on"><span class="pt">Running</span></span></td><td>${pct1(hn(d.cpu_percent))}</td><td>${pct1(hn(d.memory_percent))}</td><td>${ver(d.update)}</td></tr>`).join("")}
         ${R.apps.map(a => { const run = stateOf(a.running) === "on", upd = stateOf(a.update) === "on";
-          return `<tr><td>${a.name}</td><td><span class="pill ${run ? "on" : "off"}" title="${run ? "Running" : "Stopped"}"><span class="pt">${run ? "Running" : "Stopped"}</span></span></td>
+          return `<tr${a.cpu_percent ? ` data-detail="${a.cpu_percent}|${a.name} CPU|infra|1|24H" tabindex="0"` : ""}><td>${a.name}</td><td><span class="pill ${run ? "on" : "off"}" title="${run ? "Running" : "Stopped"}"><span class="pt">${run ? "Running" : "Stopped"}</span></span></td>
             <td>${run ? pct1(hn(a.cpu_percent)) : "—"}</td><td>${run ? pct1(hn(a.memory_percent)) : "—"}</td>
             <td>${stateOf(a.version) || "—"}${upd ? ` <span class="pill upd">→ ${stateOf(a.version_latest) || H[a.update]?.attributes?.latest_version}</span>` : ""}</td></tr>`; }).join("")}</table>`,
       R.apps.length ? `${running} of ${R.apps.length} running` : "", "apps");

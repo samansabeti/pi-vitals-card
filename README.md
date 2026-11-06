@@ -7,7 +7,7 @@ A Raspberry Pi health dashboard for Home Assistant, in a single card. It's built
 - **A live board drawing.** A line-art Pi whose parts light up from real data: the processor takes the temperature color, the cooler spins at the real fan speed, the power LED turns red on under-voltage, the Wi-Fi arcs show signal strength, and the SD slot blinks while the Pi writes to it.
 - **A verdict with its reasons.** "All systems normal" (or the worst problem), plus status facts beside the board: power, throttling, storage, backups, updates, Wi-Fi.
 - **Ring gauges** for CPU, memory, disk and temperature, each compared with its own 7-day normal ("Usually 4%", or "Above usual" when it's well outside its normal swing). Disk shows when it would be full at its typical daily growth. Tap one for its history.
-- **Live sparklines** covering the last 10 minutes. Hover (or drag on a phone) to read any moment.
+- **Live sparklines** covering the last 10 minutes. Hover (or drag on a phone) to read any moment; click one for its longer history (so do Apps rows).
 - **Storage wear.** Disk use, a disk-full forecast, database size and daily growth, data written since boot, and the write rate now.
 - **Power & performance.** Throttle flags (now and since boot), measured CPU clock, fan speed, Wi-Fi signal.
 - **Backups, updates and apps.** Only pending updates are listed, plus each app's CPU and RAM. The Backups and Updates facts open those Settings pages.
