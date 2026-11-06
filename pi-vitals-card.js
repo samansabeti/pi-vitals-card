@@ -22,12 +22,12 @@ const PV_NEEDED = [["processor_use", "Processor use"], ["memory_use_percent", "M
   ["processor_temperature", "Processor temperature"], ["load_1m", "Load (1 min)"], ["throughput_network_in", "Network throughput in"], ["last_boot", "Last boot"]];
 const PV_TIPS = {
   status: "Overall verdict. Orange when the Pi runs warm or busy, dipped on power or throttled earlier since boot, or backups are overdue. Red when it's throttling right now, short on power or low on space.",
-  cpu: "How busy the processor cores are, averaged. Home Assistant normally idles at 1–5%. Short spikes are normal; sustained 80%+ means something is working hard.",
+  cpu: "How busy the processor cores are, averaged across them. Each reading covers the few seconds since the previous one. Home Assistant normally idles at 1–5%. Short spikes are normal; sustained 80%+ means something is working hard.",
   mem: "RAM apps actually hold. Linux also uses spare RAM as a disk cache, which it hands back instantly, so that isn't counted. Under 70% is comfortable.",
   disk: "Space used on the boot disk. It holds HA, its history database and backups. Keep it under ~80% so updates and backups have room.",
   temp: "CPU temperature. A Pi 5 idles around {40-55}. The fan ramps from ~{50}, and at {80} the firmware slows the chip to cool it ('throttling').",
   power_g: "Board power from the PMIC's own rails, every 30 s. It leaves out USB devices and supply losses, so wall draw is a bit higher.",
-  live: "Live readings over the last 10 minutes. Lines step when a sensor reports a new value. Click one for its longer history.",
+  live: "The last 10 minutes of readings. The big number is the latest one (\"now\"); slide along a line to read any earlier moment. Click one for its longer history.",
   net: "Data moving over the Pi's network link. Down is arriving, up is sent. HA is chatty but small: a few KB/s is normal; bursts come from updates, backups and cameras.",
   ram: "Used is memory apps hold. Free includes cache Linux will hand back instantly.",
   swap: "Overflow memory on disk, much slower than RAM. 0 is ideal; steady use means RAM is tight.",
@@ -44,18 +44,13 @@ const PV_TIPS = {
   clock: "Measured CPU clock. It drops when idle and when throttled. Pi 5 tops out at 2,400 MHz, Pi 4 at 1,500–1,800.",
   wifi: "Wi-Fi signal at the Pi. Above −60 dBm is excellent, down to −70 is fine, below −75 expect dropouts. Ethernet is still the most reliable link for a hub.",
   ha: "Versions of Home Assistant OS and its host components.",
-  apps: "Apps (formerly add-ons) run alongside Home Assistant. Each shows whether it's running, its version, and CPU and RAM as a share of the whole Pi. Click a row for its CPU history.",
+  apps: "Apps (formerly add-ons) run alongside Home Assistant. Each shows whether it's running, its version, and CPU and RAM as a share of the whole Pi. Usage is what Home Assistant last reported (it updates every few minutes). Click a row for its CPU history.",
   updates: "Components with a newer version waiting. Install them from Settings → Updates.",
   ha_stats: "What Home Assistant tracks: entities (every sensor, light and switch), automations and scripts.",
   backup: "Home Assistant's automatic backups: when the last one finished and when the next is due.",
-  forecast: "When the disk would be full if it keeps growing at its typical daily pace (the median day-to-day change over the last two weeks, so one big install or cleanup doesn't skew it).",
-  usual: "Compared with this sensor's average over the past 7 days. Flagged when it's well outside its normal swing.",
+  forecast: "When the disk would be full if it keeps growing at its typical pace: the median day-to-day change over the last two weeks, so one big install or cleanup doesn't skew it.",
+  usual: "The 7-day average is the mean of the past week's hourly averages. The line turns orange when the reading now is well outside its normal swing.",
   events: "Reboots, Home Assistant restarts, throttling and power dips, failed backups, app stops and installed updates from the last 7 days.",
-  b_soc: "The processor (BCM2712 on a Pi 5). Its outline takes the temperature color.",
-  b_fan: "The cooler. It spins here when the real fan is running, faster with higher rpm.",
-  b_led: "Power LED: green when the supply is steady, red on under-voltage.",
-  b_sd: "The microSD slot (underneath). It lights up while the Pi is writing to it.",
-  b_wifi: "Wi-Fi signal: three arcs is excellent, one is weak.",
 };
 
 // Settings (gear in the header) are saved per user in Home Assistant's frontend user data, so they follow you to every device.
@@ -135,7 +130,7 @@ class PiVitalsCard extends HTMLElement {
   connectedCallback() {
     this.onSet = () => { this.render(true); this.renderMenu(); };
     this.onDoc = e => { if (this.tipPin && !e.composedPath().includes(this)) this.hideTip?.(); if (this.menuOpen && !e.composedPath().some(n => n.classList?.contains("menu") || n.classList?.contains("gear"))) this.toggleMenu(false); };
-    this.onKey = e => { if (e.key === "Escape") { if (this.tipEl) this.hideTip?.(); if (this.menuOpen) this.toggleMenu(false); } };
+    this.onKey = e => { if (e.key === "Escape") { if (this.tipEl) this.hideTip?.(); else if (this.menuOpen) this.toggleMenu(false); else if (this.pvPart) { this.pvPart = null; this.render(true); } } };
     addEventListener("pi-vitals-settings", this.onSet); addEventListener("click", this.onDoc, true); addEventListener("keydown", this.onKey);
   }
   disconnectedCallback() { removeEventListener("pi-vitals-settings", this.onSet); removeEventListener("click", this.onDoc, true); removeEventListener("keydown", this.onKey); }
@@ -426,7 +421,31 @@ class PiVitalsCard extends HTMLElement {
       .board .pt{fill:${surface};stroke:${text3};stroke-width:.9}
       .board .pin{fill:${text3};opacity:.55}
       .board .lbl{font-family:inherit;font-size:5.6px;font-weight:600;fill:${text3};letter-spacing:.08em}
-      .board [data-tip]{cursor:help}
+      .board{grid-template-rows:1fr auto;gap:8px}
+      .bh{font-size:12px;color:${text3};text-align:center;line-height:1.35}
+      .board .part{cursor:pointer;outline:none}
+      .board .hb{fill:transparent;stroke:transparent;stroke-width:1.2;transition:stroke .12s,fill .12s}
+      .board .part[data-part=board] .hb{stroke-width:0}
+      .board .part.sel .hb{stroke:${accent};fill:color-mix(in srgb, ${accent} 8%, transparent)}
+      .board .part[data-part=board].sel .pcb{stroke:${accent}}
+      .board .part:focus-visible .hb{stroke:${accent};stroke-dasharray:2 2}
+      .board .lbl.val{font-size:5px;font-weight:600}
+      .hero>[hidden]{display:none}
+      .pd{border:1px solid ${line};border-radius:10px;overflow:hidden;min-width:0;animation:pop .14s ease-out}
+      .pdh{display:flex;align-items:center;gap:8px;min-height:40px;box-sizing:border-box;padding:0 6px 0 14px;border-bottom:1px solid ${line};background:${raised}}
+      .pdh b{font-size:13px;font-weight:600}.pdh .m{margin-left:auto;font-size:12px;color:${text3};white-space:nowrap}
+      .pdx{flex:none;width:28px;height:28px;padding:0;border:0;border-radius:8px;background:none;display:grid;place-items:center;cursor:pointer;color:${text2}}
+      .pdx svg{width:14px;height:14px;fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round}
+      .pdx:focus-visible{outline:2px solid ${accent};outline-offset:2px}
+      .pdg{display:grid;grid-template-columns:repeat(2,minmax(0,1fr))}
+      .pdc{padding:0 14px 6px;min-width:0}.pdc+.pdc{border-left:1px solid ${line}}
+      .pdk{font-size:11px;font-weight:600;letter-spacing:.04em;text-transform:uppercase;color:${text3};padding:12px 0 2px}
+      .pdn{font-size:12px;color:${text3};padding:8px 0;line-height:1.45}
+      .qu{font-weight:400;font-size:12px;color:${text3};margin-left:2px}
+      .kvr.lk{cursor:pointer;margin:0 -14px;padding-left:14px;padding-right:8px}
+      .kvr.lk:focus-visible{outline:2px solid ${accent};outline-offset:-2px}
+      .kvr .rc{width:14px;height:14px;margin-left:4px;vertical-align:-2px;fill:none;stroke:${text3};stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round}
+      .kvr b.sp{font-weight:500;white-space:normal;max-width:62%}
       .board .fan{transform-box:fill-box;transform-origin:center;animation:spin var(--d,1s) linear infinite}
       .board .fan.off{animation:none}
       .board .sd.on{animation:blink 1.2s ease-in-out infinite}
@@ -480,10 +499,8 @@ class PiVitalsCard extends HTMLElement {
       .sv svg{display:block;width:100%;height:44px;overflow:visible}
       .scur{position:absolute;top:0;bottom:0;width:1px;background:${text3};pointer-events:none;display:none}
       .sdot{position:absolute;width:9px;height:9px;box-sizing:border-box;border-radius:50%;border:2px solid ${surface};transform:translate(-50%,-50%);pointer-events:none;display:none}
-      .stip{position:absolute;bottom:100%;margin-bottom:6px;pointer-events:none;background:${surface};border:1px solid ${line};border-radius:10px;box-shadow:0 8px 24px rgba(0,0,0,.18);padding:6px 10px;white-space:nowrap;display:none;z-index:3}
-      .stip b{font-size:17px;font-weight:600;font-variant-numeric:tabular-nums;color:${text}}.stip span{font-size:12px;color:${text2}}
-      .stip div{font-size:12px;color:${text2};font-variant-numeric:tabular-nums}
-      .sv.on .scur,.sv.on .sdot,.sv.on .stip{display:block}
+      .sv.on .scur,.sv.on .sdot{display:block}
+      .sq{font-style:normal;font-size:12px;font-weight:400;color:${text3};margin-left:6px;white-space:nowrap}.sq.on{color:${text}}
       .grid3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;align-items:start}
       .row{padding:12px 0}
       .row+.row{border-top:1px solid ${line}}
@@ -551,18 +568,20 @@ class PiVitalsCard extends HTMLElement {
       /* hover only where there's a real pointer, so a tap doesn't leave a stuck highlight */
       @media (hover:hover){
         .gear:hover{background:${fill};color:${text}}
+        .board .part:hover .hb{stroke:${text3}}.board .part[data-part=board]:hover .pcb{stroke:${text2}}
+        .kvr.lk:hover{background:${hover}}
         .fx.lk:hover,.evmore:hover,.ring[data-detail]:hover,.spark[data-detail]:hover,details.more summary:hover{background:${hover}}
         .apps tr[data-detail]:hover td{background:${hover}}
         .ring:hover .chev{opacity:1;transform:translateX(2px)}
         .i:hover{color:${text}}
       }
       @container card (max-width:940px){.facts2{grid-template-columns:repeat(2,minmax(0,1fr))}}
-      @container card (max-width:860px){.grid3{grid-template-columns:1fr}.sparks{grid-template-columns:repeat(3,minmax(0,1fr))}.facts{grid-template-columns:repeat(2,minmax(0,1fr))}}
+      @container card (max-width:860px){.pdg{grid-template-columns:1fr}.pdc+.pdc{border-left:0;border-top:1px solid ${line}}.grid3{grid-template-columns:1fr}.sparks{grid-template-columns:repeat(3,minmax(0,1fr))}.facts{grid-template-columns:repeat(2,minmax(0,1fr))}}
       @container card (max-width:760px){.rings{grid-template-columns:repeat(2,minmax(0,1fr))}}
       @container card (max-width:640px){.hero{grid-template-columns:1fr}}
       @container card (max-width:520px){.sparks{grid-template-columns:repeat(2,minmax(0,1fr))}.apps td:first-child .sub,.apps .pt,.blurb,.upt,.head .tile{display:none}
         .apps .pill{padding:0 6px;gap:0}.apps td,.apps th{padding-left:8px}.ring{flex-direction:column;align-items:flex-start;gap:8px;padding:12px}.ring svg{width:44px;height:44px}.ring .rt{padding-right:0;width:100%}.num b{font-size:22px}}
-    </style><ha-card><div class="head"><div class="hl"></div><button class="gear" aria-label="Settings" aria-haspopup="dialog" aria-expanded="false"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 4.5h6M11.5 4.5h2M2.5 11.5h2M7.5 11.5h6"/><circle cx="10" cy="4.5" r="1.5"/><circle cx="6" cy="11.5" r="1.5"/></svg></button></div><div class="hero"><div class="board"></div><div class="facts2 cells"></div></div><div class="body"></div><div class="menu" role="dialog" aria-label="Settings"></div><div class="tipbox"></div></ha-card>`;
+    </style><ha-card><div class="head"><div class="hl"></div><button class="gear" aria-label="Settings" aria-haspopup="dialog" aria-expanded="false"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 4.5h6M11.5 4.5h2M2.5 11.5h2M7.5 11.5h6"/><circle cx="10" cy="4.5" r="1.5"/><circle cx="6" cy="11.5" r="1.5"/></svg></button></div><div class="hero"><div class="board"></div><div class="facts2 cells"></div><div class="pd" hidden></div></div><div class="body"></div><div class="menu" role="dialog" aria-label="Settings"></div><div class="tipbox"></div></ha-card>`;
     this.wireTips();
     const R1 = this.shadowRoot, release = () => {
       this.pressing = false; this.holdUntil = Date.now() + 400;
@@ -581,12 +600,15 @@ class PiVitalsCard extends HTMLElement {
       if (e.target.closest(".gear")) { this.toggleMenu(!this.menuOpen); return; }
       const set = e.target.closest("[data-set]");
       if (set) { const v = set.dataset.v; window.piVitals.save(this._hass, { [set.dataset.set]: v === "true" ? true : v === "false" ? false : v }); return; }
+      const pt = e.target.closest("[data-part]");
+      if (pt) { this.pvPart = this.pvPart === pt.dataset.part ? null : pt.dataset.part; this.render(true); return; }
+      if (e.target.closest("[data-part-close]")) { this.pvPart = null; this.render(true); return; }
       if (e.target.closest("[data-evall]")) { this.evAll = !this.evAll; this.render(true); return; }
       const s = e.target.closest("summary"); if (s) { this.moreOpen = !s.parentElement.open; return; }
       const a = e.target.closest("[data-nav]"); if (a) { e.preventDefault(); history.pushState(null, "", a.dataset.nav); window.dispatchEvent(new CustomEvent("location-changed")); return; }
       const g = e.target.closest("[data-detail]"); if (g && !e.target.closest("[data-tip]") && !this.dragged) open(g);
     });
-    this.shadowRoot.addEventListener("keydown", e => { const l = e.target.closest?.(".fx[data-nav]"); if (l && e.key === "Enter") { l.click(); return; } const g = e.target.closest?.("[data-detail]"); if (g && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); open(g); } });
+    this.shadowRoot.addEventListener("keydown", e => { const l = e.target.closest?.(".fx[data-nav],[data-part]"); if (l && (e.key === "Enter" || (e.key === " " && l.dataset.part))) { e.preventDefault(); l.dispatchEvent(new MouseEvent("click", { bubbles: true, composed: true })); return; } const g = e.target.closest?.("[data-detail]"); if (g && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); open(g); } });
     // sparkline scrub: same cursor line, dot and tooltip as the expanded charts (hover with a mouse, drag with a finger)
     const R0 = this.shadowRoot, svAt = e => e.target.closest?.(".sv");
     const move = e => { const sv = svAt(e); if (!sv || (e.pointerType !== "mouse" && !this.sDown)) return; const rc = sv.getBoundingClientRect(); this.sh = { id: sv.dataset.id, f: Math.max(0, Math.min(1, (e.clientX - rc.left) / rc.width)) }; this.scrubSpark(); };
@@ -621,20 +643,23 @@ class PiVitalsCard extends HTMLElement {
     const r = 24, c = 2 * Math.PI * r, p = Math.max(0, Math.min(100, pct ?? 0));
     return `<svg viewBox="0 0 58 58"><circle class="trk" cx="29" cy="29" r="${r}"/><circle class="val" cx="29" cy="29" r="${r}" style="stroke:${color}" stroke-dasharray="${c}" stroke-dashoffset="${c * (1 - p / 100)}"/></svg>`;
   }
+  // Scrubbing a sparkline: the big number shows the reading under the finger / pointer and "now" turns into its time.
   scrubSpark() {
-    for (const sv of this.shadowRoot.querySelectorAll(".sv.on")) if (sv.dataset.id !== this.sh?.id) sv.classList.remove("on");
+    const restore = sv => { const nm = sv.closest(".spark")?.querySelector(".num"); if (!nm?.dataset.live) return; const [v, u] = nm.dataset.live.split("|");
+      nm.querySelector("b").textContent = v; nm.querySelector("span").textContent = u; const q = nm.querySelector(".sq"); q.textContent = "now"; q.classList.remove("on"); };
+    for (const sv of this.shadowRoot.querySelectorAll(".sv.on")) if (sv.dataset.id !== this.sh?.id) { sv.classList.remove("on"); restore(sv); }
     const sv = this.sh && this.shadowRoot.querySelector(`.sv[data-id="${this.sh.id}"]`), g = sv && this.sg?.[this.sh.id];
     if (!sv || !g?.pts.length) return;
     const t = g.t0 + this.sh.f * PV_WINDOW;
     let p = null; for (const q of g.pts) { if (q[0] <= t) p = q; else break; }
-    if (!p) { sv.classList.remove("on"); return; }
-    const left = this.sh.f * 100 + "%", tip = sv.querySelector(".stip");
+    if (!p) { sv.classList.remove("on"); restore(sv); return; }
+    const left = this.sh.f * 100 + "%";
     sv.querySelector(".scur").style.left = left;
     Object.assign(sv.querySelector(".sdot").style, { left, top: (g.y(p[1]) / g.H * 100) + "%", background: sv.dataset.c });
-    tip.innerHTML = `<b>${g.fmt(p[1])}</b><span> ${g.unit(p[1])}</span><div>${new Date(p[0]).toLocaleTimeString([], { hour: "numeric", minute: "2-digit", second: "2-digit" })}</div>`;
+    const nm = sv.closest(".spark").querySelector(".num"), q = nm.querySelector(".sq");
+    nm.querySelector("b").textContent = g.fmt(p[1]); nm.querySelector("span").textContent = g.unit(p[1]);
+    q.textContent = new Date(p[0]).toLocaleTimeString([], { hour: "numeric", minute: "2-digit", second: "2-digit" }); q.classList.add("on");
     sv.classList.add("on");
-    const w = tip.offsetWidth, W = sv.offsetWidth;
-    tip.style.left = Math.max(-12, Math.min(W - w + 12, this.sh.f * W - w / 2)) + "px";
   }
   spark(id, color) {
     const pts = this.buf[id] || [], now = Date.now(), t0 = now - PV_WINDOW, W = 200, H = 44;
@@ -650,36 +675,45 @@ class PiVitalsCard extends HTMLElement {
       <path d="${d}V${H}H${x(pts[0][0]).toFixed(1)}Z" fill="url(#${gid})"/><path d="${d}" fill="none" style="stroke:${color}" stroke-width="2" vector-effect="non-scaling-stroke" stroke-linejoin="round"/>
       <circle cx="${W}" cy="${last}" r="2.6" style="fill:${color}"/></svg>`;
   }
-  // Pi 5 line drawing (85 × 56 mm at 2 px/mm). Parts carry live state; redrawn only when that state changes.
+  // Pi 5 line drawing (85 × 56 mm at 2 px/mm). Every part is a button: it opens that part's live readings and specs.
+  // Parts carry live state (temperature color and reading on the processor, RAM fill, fan spin, LED, Wi-Fi arcs, SD writes).
   board(s) {
-    const C = this.C, cx = 66, cy = 58;
-    const wifi = s.wifi == null ? "" : `<g data-tip="b_wifi" transform="translate(28 36)">${[[4, 1], [7, 2], [10, 3]].map(([r, i]) =>
-      `<path d="M${(-r * .72).toFixed(2)} ${(-r * .69).toFixed(2)}A${r} ${r} 0 0 1 ${(r * .72).toFixed(2)} ${(-r * .69).toFixed(2)}" fill="none" stroke-width="1.4" stroke-linecap="round" style="stroke:${i <= s.wifi ? C.accent : C.text3};opacity:${i <= s.wifi ? 1 : .35}"/>`).join("")}
-      <circle r="1.3" style="fill:${s.wifi ? C.accent : C.text3}"/><rect x="-11" y="-11" width="22" height="13" fill="transparent"/></g>`;
+    const C = this.C, cx = 66, cy = 58, sel = k => s.part === k ? " sel" : "";
+    // each part: a hit box (also the hover / selected outline) around its drawing
+    const part = (k, name, [x, y, w, h], body) => `<g class="part${sel(k)}" data-part="${k}" role="button" tabindex="0" aria-label="${name}">
+      <rect class="hb" x="${x}" y="${y}" width="${w}" height="${h}" rx="3"/>${body}</g>`;
+    const arcs = s.wifi == null ? [0, 0, 0] : [1, 2, 3].map(i => i <= s.wifi);
+    const wifi = `<g transform="translate(28 36)">${[4, 7, 10].map((r, i) =>
+      `<path d="M${(-r * .72).toFixed(2)} ${(-r * .69).toFixed(2)}A${r} ${r} 0 0 1 ${(r * .72).toFixed(2)} ${(-r * .69).toFixed(2)}" fill="none" stroke-width="1.4" stroke-linecap="round" style="stroke:${arcs[i] ? C.accent : C.text3};opacity:${arcs[i] ? 1 : .35}"/>`).join("")}
+      <circle r="1.3" style="fill:${s.wifi ? C.accent : C.text3}"/></g>`;
     const pins = Array.from({ length: 20 }, (_, i) => `<circle class="pin" cx="${(19.5 + i * 4.85).toFixed(2)}" cy="4.9" r=".95"/><circle class="pin" cx="${(19.5 + i * 4.85).toFixed(2)}" cy="8.3" r=".95"/>`).join("");
     const blades = Array.from({ length: 9 }, (_, i) => `<path d="M${cx + 7} ${cy}Q${cx + 14} ${cy - 5} ${cx + 19.5} ${cy - 1.5}" transform="rotate(${i * 40} ${cx} ${cy})"/>`).join("");
-    const fan = s.fan == null ? "" : `<g data-tip="b_fan"><circle class="ln" cx="${cx}" cy="${cy}" r="22"/>
-      <g class="fan${s.fan ? "" : " off"}" style="--d:${s.fanDur}s" fill="none" stroke-width=".9" stroke-linecap="round"><g style="stroke:${s.fan ? C.accent : C.text3};opacity:${s.fan ? .55 : .4}">${blades}</g></g></g>`;
-    return `<svg viewBox="-8 -2 192 124" role="img" aria-label="Raspberry Pi board status">
-      <rect class="pcb" x="0" y="0" width="170" height="112" rx="6"/>
-      ${[[7, 7], [123, 7], [7, 105], [123, 105]].map(([x, y]) => `<circle class="ln" cx="${x}" cy="${y}" r="2.6"/>`).join("")}
-      <rect class="pt" x="15" y="2" width="100" height="9.4" rx="1.5"/>${pins}
-      <rect class="pt" x="146" y="4" width="30" height="25" rx="2"/><text class="lbl" x="161" y="18.5" text-anchor="middle">ETH</text>
-      <rect class="pt" x="149" y="37" width="27" height="26" rx="2"/><text class="lbl" x="162.5" y="52" text-anchor="middle">USB</text>
-      <rect class="pt" x="149" y="71" width="27" height="26" rx="2"/><text class="lbl" x="162.5" y="86" text-anchor="middle">USB</text>
-      <rect class="pt" x="12" y="106" width="15" height="9" rx="4"/><rect class="pt" x="36" y="107" width="11" height="7" rx="1.5"/><rect class="pt" x="54" y="107" width="11" height="7" rx="1.5"/>
-      <g data-tip="b_sd"><rect class="sd${s.sd ? " on" : ""}" x="-5" y="46" width="9" height="20" rx="1.5" stroke-width="1" style="fill:var(--sh-surface, #fff);stroke:${s.sd ? C.accent : C.text3}"/>
-        <text class="lbl" x="7.5" y="58" style="${s.sd ? `fill:${C.accent}` : ""}">SD</text></g>
-      <g data-tip="b_led"><circle cx="10" cy="93" r="2.3" style="fill:${s.led};filter:drop-shadow(0 0 1.5px ${s.led})"/><text class="lbl" x="15" y="95">PWR</text></g>
-      ${wifi}
-      ${fan}
-      <g data-tip="b_soc"><rect x="${cx - 12}" y="${cy - 12}" width="24" height="24" rx="3" stroke-width="1.3" style="fill:color-mix(in srgb, ${s.soc} 16%, var(--sh-surface, #fff));stroke:${s.soc}"/>
-        <text class="lbl" x="${cx}" y="${cy + 2}" text-anchor="middle" style="fill:${s.soc}">${s.chip}</text></g>
-      <rect class="pt" x="96" y="46" width="18" height="24" rx="1.5"/><text class="lbl" x="105" y="78" text-anchor="middle">RAM</text>
-      <rect class="pt" x="124" y="51" width="14" height="14" rx="1.5"/><text class="lbl" x="131" y="73" text-anchor="middle">RP1</text>
+    const fanOn = !!s.fan;
+    const ramH = s.mem == null ? 0 : Math.max(0, Math.min(1, s.mem / 100)) * 22;
+    return `<svg viewBox="-8 -2 192 124" role="group" aria-label="Raspberry Pi board: pick a part">
+      ${part("board", "Whole board", [0, 0, 170, 112], `<rect class="pcb" x="0" y="0" width="170" height="112" rx="6"/>
+        ${[[7, 7], [123, 7], [7, 105], [123, 105]].map(([x, y]) => `<circle class="ln" cx="${x}" cy="${y}" r="2.6"/>`).join("")}`)}
+      ${part("gpio", "GPIO header", [13, 0, 104, 13], `<rect class="pt" x="15" y="2" width="100" height="9.4" rx="1.5"/>${pins}`)}
+      ${part("eth", "Ethernet port", [144, 2, 34, 29], `<rect class="pt" x="146" y="4" width="30" height="25" rx="2" style="${s.eth ? `stroke:${C.accent}` : ""}"/><text class="lbl" x="161" y="18.5" text-anchor="middle" style="${s.eth ? `fill:${C.accent}` : ""}">ETH</text>`)}
+      ${part("usb", "USB ports", [147, 35, 31, 64], `<rect class="pt" x="149" y="37" width="27" height="26" rx="2"/><text class="lbl" x="162.5" y="52" text-anchor="middle">USB</text>
+        <rect class="pt" x="149" y="71" width="27" height="26" rx="2"/><text class="lbl" x="162.5" y="86" text-anchor="middle">USB</text>`)}
+      ${part("hdmi", "Micro-HDMI ports", [33, 104, 35, 13], `<rect class="pt" x="36" y="107" width="11" height="7" rx="1.5"/><rect class="pt" x="54" y="107" width="11" height="7" rx="1.5"/>`)}
+      ${part("power", "Power input", [4, 87, 27, 30], `<rect class="pt" x="12" y="106" width="15" height="9" rx="4"/>
+        <circle cx="10" cy="93" r="2.3" style="fill:${s.led};filter:drop-shadow(0 0 1.5px ${s.led})"/><text class="lbl" x="15" y="95">PWR</text>`)}
+      ${part("sd", "microSD card", [-7, 44, 25, 24], `<rect class="sd${s.sd ? " on" : ""}" x="-5" y="46" width="9" height="20" rx="1.5" stroke-width="1" style="fill:var(--sh-surface, #fff);stroke:${s.sd ? C.accent : C.text3}"/>
+        <text class="lbl" x="7.5" y="58" style="${s.sd ? `fill:${C.accent}` : ""}">SD</text>`)}
+      ${part("wifi", "Wi-Fi and Bluetooth", [16, 23, 24, 16], wifi)}
+      ${s.fan == null ? "" : part("fan", "Cooling fan", [43, 35, 46, 46], `<circle class="ln" cx="${cx}" cy="${cy}" r="22"/>
+        <g class="fan${fanOn ? "" : " off"}" style="--d:${s.fanDur}s" fill="none" stroke-width=".9" stroke-linecap="round"><g style="stroke:${fanOn ? C.accent : C.text3};opacity:${fanOn ? .55 : .4}">${blades}</g></g>`)}
+      ${part("soc", "Processor", [52, 44, 28, 28], `<rect x="${cx - 12}" y="${cy - 12}" width="24" height="24" rx="3" stroke-width="1.3" style="fill:color-mix(in srgb, ${s.soc} 16%, var(--sh-surface, #fff));stroke:${s.soc}"/>
+        <text class="lbl" x="${cx}" y="${s.temp ? cy - 1.5 : cy + 2}" text-anchor="middle" style="fill:${s.soc}">${s.chip}</text>
+        ${s.temp ? `<text class="lbl val" x="${cx}" y="${cy + 6.5}" text-anchor="middle" style="fill:${s.soc}">${s.temp}</text>` : ""}`)}
+      ${part("ram", "Memory", [94, 44, 22, 38], `<rect class="pt" x="96" y="46" width="18" height="24" rx="1.5"/>
+        ${ramH ? `<rect x="97" y="${(69 - ramH).toFixed(1)}" width="16" height="${ramH.toFixed(1)}" rx="1" style="fill:${C.accent};opacity:.22"/>` : ""}
+        <text class="lbl" x="105" y="78" text-anchor="middle">RAM</text>`)}
+      ${part("rp1", "RP1 I/O controller", [122, 49, 18, 27], `<rect class="pt" x="124" y="51" width="14" height="14" rx="1.5"/><text class="lbl" x="131" y="73" text-anchor="middle">RP1</text>`)}
     </svg>`;
   }
-  // force: a redraw the person asked for (Show all, a setting); live data redraws wait while a finger or button is down
   render(force) {
     if (!this._hass || !this.config) return;
     if (!force && (this.holdUntil > Date.now() || (this.pressing && Date.now() - this.pressT < 3000))) { this.pending = true; return; }
@@ -726,7 +760,7 @@ class PiVitalsCard extends HTMLElement {
       const u = T.norm[k]; if (!u || x == null) return "";
       const mu = k === "temp" && isF ? (u.mu - 32) * 5 / 9 : u.mu, sd = k === "temp" && isF ? u.sd * 5 / 9 : u.sd, gap = Math.max(1.5 * sd, min);
       const hi = x - mu > gap, lo = mu - x > gap;
-      return `<div class="nrm"${hi ? ` style="color:${C.warn}"` : ""}>${hi ? "Above usual · " : lo ? "Below usual · " : "Usually "}${show(mu)}</div>`;
+      return `<div class="nrm"${hi ? ` style="color:${C.warn}"` : ""}>${hi ? "Above 7-day avg of " : lo ? "Below 7-day avg of " : "7-day avg "}${show(mu)}</div>`;
     };
 
     // verdict: worst issue wins
@@ -747,21 +781,22 @@ class PiVitalsCard extends HTMLElement {
 
     // board, redrawn only when its state changes
     const bs = { soc: tempColor, chip: /Pi 5/.test(model) ? "2712" : /Pi 4/.test(model) ? "2711" : "SoC", fan: fan == null ? null : fan > 0, fanDur: fan ? Math.max(0.25, Math.round(2400 / fan * 4) / 4) : 1,
-      led: uvNow ? C.bad : C.ok, wifi: wifiBars, sd: (VA.disk_write_kbs ?? 0) > 50 && /^mmcblk/.test(VA.disk_device || "") };
+      led: uvNow ? C.bad : C.ok, wifi: wifiBars, sd: (VA.disk_write_kbs ?? 0) > 50 && /^mmcblk/.test(VA.disk_device || ""),
+      temp: tC == null ? null : Math.round(this.tC2D(tC)) + "°", mem: mem == null ? null : Math.round(mem), eth: wired, part: this.pvPart || null };
     const bsig = JSON.stringify(bs);
     const boardEl = this.shadowRoot.querySelector(".board");
     boardEl.hidden = !isPi; this.shadowRoot.querySelector(".hero").classList.toggle("solo", !isPi);
-    if (isPi && bsig !== this.boardSig) { this.boardSig = bsig; boardEl.innerHTML = this.board(bs); }
+    if (isPi && bsig !== this.boardSig) { this.boardSig = bsig; boardEl.innerHTML = this.board(bs) + `<div class="bh">${this.pvPart ? "Showing the " + PV_PARTS[this.pvPart] + ". Tap it again to go back." : "Tap any part for its live readings and specs"}</div>`; }
 
     // header (model, uptime, verdict badge, settings) and the status facts beside the board
     const fx = [];
-    if (watts != null || ps) fx.push([uvNow ? C.bad : uvBoot ? C.warn : C.ok, "Power", uvNow ? "Under-voltage now" : uvBoot ? "Dipped since boot" : "Stable since boot", watts != null ? `${watts.toFixed(2)} W board` : "Supply checker", "uv"]);
-    if (thr) fx.push([slowNow ? C.bad : slowBoot ? C.warn : C.ok, "Throttling", slowNow ? "Active now" : slowBoot ? "Earlier since boot" : "None since boot", VA.arm_mhz ? `CPU at ${VA.arm_mhz.toLocaleString()} MHz` : "", "throttle"]);
+    if (watts != null || ps) fx.push([uvNow ? C.bad : uvBoot ? C.warn : C.ok, "Power", uvNow ? "Under-voltage now" : uvBoot ? "Dipped since boot" : "Stable since boot", watts != null ? `Board ${watts.toFixed(2)} W now` : "Supply checker", "uv"]);
+    if (thr) fx.push([slowNow ? C.bad : slowBoot ? C.warn : C.ok, "Throttling", slowNow ? "Active now" : slowBoot ? "Earlier since boot" : "None since boot", VA.arm_mhz ? `CPU ${VA.arm_mhz.toLocaleString()} MHz now` : "", "throttle"]);
     if (disk != null) fx.push([busy(disk, 80, 90) || C.ok, "Storage", `${Math.round(disk)}% used`, [devKind(VA.disk_device), VA.db_mb ? `DB ${VA.db_mb >= 1000 ? (VA.db_mb / 1000).toFixed(1) + " GB" : Math.round(VA.db_mb) + " MB"}` : ""].filter(Boolean).join(" · "), "storage"]);
     if (H[bLast]) fx.push([backupAgeD == null ? C.neutral : backupAgeD > cfg.backup_stale_days ? C.warn : C.ok, "Backups", ago(bLast) || "None yet", ago(bNext) ? `Next ${ago(bNext)}` : "", "backup"]);
     fx.push([pendingU.length ? C.warn : C.ok, "Updates", pendingU.length ? `${pendingU.length} available` : "All current", pendingU.length ? pendingU.map(u => (u.attributes.friendly_name || "").replace(/ update$/i, "")).join(", ") : `${updates.length} tracked`, "updates"]);
     if (wired) fx.push([C.ok, "Network", "Ethernet", ifc, "net"]);
-    else if (dbm != null) fx.push([dbm > -67 ? C.ok : dbm > -75 ? C.warn : C.bad, "Wi-Fi", dbm > -60 ? "Excellent" : dbm > -70 ? "Good" : dbm > -75 ? "Fair" : "Weak", `${String(dbm).replace("-", "−")} dBm`, "wifi"]);
+    else if (dbm != null) fx.push([dbm > -67 ? C.ok : dbm > -75 ? C.warn : C.bad, "Wi-Fi", dbm > -60 ? "Excellent" : dbm > -70 ? "Good" : dbm > -75 ? "Fair" : "Weak", `${String(dbm).replace("-", "−")} dBm now`, "wifi"]);
     this.shadowRoot.querySelector(".hl").innerHTML = `<span class="tile"><ha-icon icon="${isPi ? "mdi:raspberry-pi" : "mdi:server"}"></ha-icon></span>
       <div class="ttl"><span class="title">${model}</span>${up ? `<span class="upt">Up ${up}</span>` : ""}</div>
       <span class="status"><i class="dot" style="background:${vColor}"></i><span class="vt">${verdict}</span>${this.tip("status")}</span>`;
@@ -771,13 +806,13 @@ class PiVitalsCard extends HTMLElement {
 
     // gauges
     const gauges = [
-      ["CPU", "cpu", cpu == null ? "—" : Math.round(cpu), "%", cpu, busy(cpu, 60, 85) || C.accent, l1 != null ? `Load ${l1.toFixed(2)}` : `${cores} cores`, `${this.S("processor_use")}|CPU|infra|0|6H`, usual("cpu", cpu, 3, x => Math.round(x) + "%")],
+      ["CPU", "cpu", cpu == null ? "—" : Math.round(cpu), "%", cpu, busy(cpu, 60, 85) || C.accent, l1 != null ? `Load ${l1.toFixed(2)} · 1-min avg` : `${cores} cores`, `${this.S("processor_use")}|CPU|infra|0|6H`, usual("cpu", cpu, 3, x => Math.round(x) + "%")],
       ["Memory", "mem", mem == null ? "—" : Math.round(mem), "%", mem, busy(mem, 70, 90) || C.accent, memTot ? `${gb(memUse)} of ${gb(memTot)} GB` : "", `${this.S("memory_usage")}|Memory|infra|0|6H`, usual("mem", mem, 3, x => Math.round(x) + "%")],
       ["Disk", "disk", disk == null ? "—" : Math.round(disk), "%", disk, busy(disk, 75, 90) || C.accent, dTot ? `${dUse.toFixed(1)} of ${dTot.toFixed(0)} GB` : "", `${this.S("disk_usage")}|Disk|infra|1|7D`, forecast ? `<div class="nrm"${fColor ? ` style="color:${fColor}"` : ""}>${forecast}</div>` : ""],
       ["Temperature", "temp", tC == null ? "—" : Math.round(this.tC2D(tC)), tUnit, tC == null ? 0 : tC / 85 * 100, tempColor, fan == null ? "" : fan ? `Fan ${Math.round(fan).toLocaleString()} rpm` : "Fan idle", `${this.S("processor_temperature")}|CPU temperature|climate|1|1H|t`, usual("temp", tC, 2, x => Math.round(this.tC2D(x)) + tUnit)],
     ];
     const gaugesHtml = gauges.filter(g => H[g[7].split("|")[0]]).map(([name, t, val, u, pct, col, sub, det, nrm]) => `<div class="ring" data-detail="${det}" role="button" tabindex="0" aria-label="Open ${name} history">${this.ring(pct, col)}
-      <div class="rt"><div class="k">${name}${this.tip(t)}</div><div class="num"><b>${val}</b><span>${u}</span></div><div class="sub">${sub || "&nbsp;"}</div>${nrm}</div><svg class="chev" viewBox="0 0 16 16" aria-hidden="true"><path d="M6.5 4l4 4-4 4"/></svg></div>`).join("");
+      <div class="rt"><div class="k">${name} <span class="qu">now</span>${this.tip(t)}</div><div class="num"><b>${val}</b><span>${u}</span></div><div class="sub">${sub || "&nbsp;"}</div>${nrm}</div><svg class="chev" viewBox="0 0 16 16" aria-hidden="true"><path d="M6.5 4l4 4-4 4"/></svg></div>`).join("");
 
     // sparks
     const fmt = (x, u) => x == null ? "—" : u === "MB/s" ? (x < 1 ? (x * 1000).toFixed(0) : x.toFixed(1)) : u === "W" ? x.toFixed(2) : /°/.test(u) ? x.toFixed(0) : u === "" ? x.toFixed(2) : Math.round(x);
@@ -789,8 +824,8 @@ class PiVitalsCard extends HTMLElement {
       this.sfmt[id] = y => temp ? fmt(toD(y), tUnit) : fmt(y, u); this.sunit[id] = y => temp ? tUnit : unit(y, u);
       const dec = { cpu: 0, mem: 0, temp: 1, power: 2, load: 2, down: 3, up: 3 }[key];
       return `<div class="spark" data-detail="${id}|${name}|${temp ? "climate" : "infra"}|${dec}|6H${temp ? "|t" : ""}" role="button" tabindex="0" aria-label="Open ${name} history"><div class="lbl"><i class="dot" style="background:${col}"></i>${name}${key === "down" ? this.tip("net") : ""}</div>
-      <div class="num"><b>${this.sfmt[id](x)}</b><span>${this.sunit[id](x)}</span></div>
-      <div class="sv" data-id="${id}" data-c="${col}">${this.spark(id, col)}<div class="scur"></div><div class="sdot"></div><div class="stip"></div></div></div>`; }).join("");
+      <div class="num" data-live="${this.sfmt[id](x)}|${this.sunit[id](x)}"><b>${this.sfmt[id](x)}</b><span>${this.sunit[id](x)}</span><em class="sq">now</em></div>
+      <div class="sv" data-id="${id}" data-c="${col}">${this.spark(id, col)}<div class="scur"></div><div class="sdot"></div></div></div>`; }).join("");
 
     // sections
     const panel = (title, body, meta = "", tip = "") => `<div class="panel"><div class="ph"><b>${title}</b>${tip ? this.tip(tip) : ""}${meta ? `<span class="m">${meta}</span>` : ""}</div><div class="pb">${body}</div></div>`;
@@ -801,21 +836,21 @@ class PiVitalsCard extends HTMLElement {
       <div class="row"><div class="rowh"><span>Disk${this.tip("storage")}</span><span><b>${dUse != null ? dUse.toFixed(1) : "—"} GB</b> used · ${dFree != null ? dFree.toFixed(1) : "—"} free</span></div>
         <div class="bar"><span style="width:${disk ?? 0}%;background:${busy(disk, 80, 90) || C.accent}"></span></div></div>
       <div class="kvs">
-        ${forecast ? kvr("Forecast", `${daysLeft == null ? forecast : `<span${fColor ? ` style="color:${fColor}"` : ""}>${forecast}</span>`} <span class="x">· ${slope >= 0 ? "+" : "−"}${Math.abs(slope).toFixed(2)} GB/day</span>`, "forecast") : ""}
-        ${VA.db_mb != null ? kvr("Database", `${mb(VA.db_mb)} <span class="x">· ${VA.db_mb_per_day != null ? (VA.db_mb_per_day >= 0 ? "+" : "−") + Math.abs(VA.db_mb_per_day) + " MB/day" : "growth after 1 day"}</span>`, "db") : ""}
-        ${VA.disk_written_gb != null ? kvr("Written since boot", `${VA.disk_written_gb} GB`, "writes") : ""}
-        ${VA.disk_write_kbs != null ? kvr("Writing now", `${VA.disk_write_kbs} kB/s`) : ""}
-        ${kvr("Swap", `${swapUse != null ? Math.round(swapUse) : "—"} MB <span class="x">· ${swap ?? "—"}%</span>`, "swap")}
+        ${forecast ? kvr("Disk full", daysLeft == null ? "Not filling up" : `<span${fColor ? ` style="color:${fColor}"` : ""}>~${fullIn(daysLeft)}</span> <span class="x">at +${slope.toFixed(2)} GB/day</span>`, "forecast") : ""}
+        ${VA.db_mb != null ? kvr("Database", `${mb(VA.db_mb)} <span class="x">now</span>`, "db") + kvr("DB growth", VA.db_mb_per_day != null ? `${VA.db_mb_per_day >= 0 ? "+" : "−"}${Math.abs(VA.db_mb_per_day)} MB/day <span class="x">7-day avg</span>` : `<span class="x">Shows after 1 day</span>`) : ""}
+        ${VA.disk_written_gb != null ? kvr("Written", `${VA.disk_written_gb} GB <span class="x">since boot</span>`, "writes") : ""}
+        ${VA.disk_write_kbs != null ? kvr("Writing", `${VA.disk_write_kbs} kB/s <span class="x">30-s avg</span>`, "writes") : ""}
+        ${kvr("Swap", `${swapUse != null ? Math.round(swapUse) : "—"} MB <span class="x">${swap ?? "—"}% now</span>`, "swap")}
       </div>`, devKind(VA.disk_device) || "");
     const flagName = { under_voltage: "Under-voltage", freq_capped: "Capped", throttled: "Throttled", soft_temp_limit: "Soft temp limit" };
     const flagPills = (list, cls) => list.length ? `<span class="flags">${list.map(f => `<span class="pill ${cls}">${flagName[f] || f}</span>`).join("")}</span>` : `<span class="pill on">None</span>`;
     const perf = panel("Power & performance", `<div class="kvs">
-      ${watts != null ? kvr("Board power", `${watts.toFixed(2)} W`, "power_g") : ""}
-      ${VA.arm_mhz ? kvr("CPU clock", `${VA.arm_mhz.toLocaleString()} MHz${/Pi 5/.test(model) ? ` <span class="x">of 2,400</span>` : ""}`, "clock") : ""}
+      ${watts != null ? kvr("Board power", `${watts.toFixed(2)} W <span class="x">now</span>`, "power_g") : ""}
+      ${VA.arm_mhz ? kvr("CPU clock", `${VA.arm_mhz.toLocaleString()} MHz <span class="x">now${/Pi 5/.test(model) ? ", of 2,400" : ""}</span>`, "clock") : ""}
       ${thr ? kvr("Throttling now", flagPills(tNow, "bad"), "throttle") + kvr("Since boot", flagPills(tBoot, "upd"), "throttle") : ""}
       ${!thr && ps ? kvr("Power supply", ps === "on" ? `<span class="pill bad">Under-voltage</span>` : `<span class="pill on">OK</span>`, "uv") : ""}
-      ${fan != null ? kvr("Fan", fan ? `${Math.round(fan).toLocaleString()} rpm <span class="x">· ${Math.round(fan / cfg.fan_max_rpm * 100)}%</span>` : "Idle", "fan") : ""}
-      ${!wired && dbm != null ? kvr("Wi-Fi signal", `${String(dbm).replace("-", "−")} dBm`, "wifi") : ""}
+      ${fan != null ? kvr("Fan", fan ? `${Math.round(fan).toLocaleString()} rpm <span class="x">now, ${Math.round(fan / cfg.fan_max_rpm * 100)}% of full</span>` : `Idle <span class="x">now</span>`, "fan") : ""}
+      ${!wired && dbm != null ? kvr("Wi-Fi signal", `${String(dbm).replace("-", "−")} dBm <span class="x">now</span>`, "wifi") : ""}
     </div>`);
     const care = panel("Backups & updates", `<div class="kvs">
       ${H[bLast] ? kvr("Last backup", ago(bLast) || "—", "backup") + kvr("Next backup", ago(bNext) || "—") : ""}
@@ -846,7 +881,8 @@ class PiVitalsCard extends HTMLElement {
           return `<tr${a.cpu_percent ? ` data-detail="${a.cpu_percent}|${a.name} CPU|infra|1|24H" tabindex="0"` : ""}><td>${a.name}</td><td><span class="pill ${run ? "on" : "off"}" title="${run ? "Running" : "Stopped"}"><span class="pt">${run ? "Running" : "Stopped"}</span></span></td>
             <td>${run ? pct1(hn(a.cpu_percent)) : "—"}</td><td>${run ? pct1(hn(a.memory_percent)) : "—"}</td>
             <td>${stateOf(a.version) || "—"}${upd ? ` <span class="pill upd">→ ${stateOf(a.version_latest) || H[a.update]?.attributes?.latest_version}</span>` : ""}</td></tr>`; }).join("")}</table>`,
-      R.apps.length ? `${running} of ${R.apps.length} running` : "", "apps");
+      [R.apps.length ? `${running} of ${R.apps.length} running` : "", (() => { const ts = [...sys.map(([, d]) => d.cpu_percent), ...R.apps.map(a => a.cpu_percent)].map(id => H[id]?.last_updated).filter(Boolean).map(x => Date.parse(x));
+        return ts.length ? "usage as of " + this.dur(Date.now() - Math.max(...ts)) + " ago" : ""; })()].filter(Boolean).join(" · "), "apps");
 
     // setup help: System Monitor missing, or some of its sensors still off (it ships with most disabled)
     const smLink = `<a data-nav="/config/integrations/integration/systemmonitor">Open System Monitor ›</a>`;
@@ -884,7 +920,7 @@ class PiVitalsCard extends HTMLElement {
           <div class="row kv">${big("Downloaded", sz(netIn).split(" ")[0], sz(netIn).split(" ")[1] || "")}${big("Uploaded", sz(netOut).split(" ")[0], sz(netOut).split(" ")[1] || "")}
             ${big("Packets in", cnt(pIn))}${big("Packets out", cnt(pOut))}</div>
           <div class="row"><table><tr><th></th><th>In</th><th>Out</th></tr>
-            <tr><td>Per day</td><td>${days ? sz(netIn / days) : "—"}</td><td>${days ? sz(netOut / days) : "—"}</td></tr>
+            <tr><td>Per day <span class="sub">avg since boot</span></td><td>${days ? sz(netIn / days) : "—"}</td><td>${days ? sz(netOut / days) : "—"}</td></tr>
             <tr><td>Now</td><td>${fmt(n(`network_throughput_in_${ifc}`), "MB/s")} ${unit(n(`network_throughput_in_${ifc}`), "MB/s")}</td><td>${fmt(n(`network_throughput_out_${ifc}`), "MB/s")} ${unit(n(`network_throughput_out_${ifc}`), "MB/s")}</td></tr></table></div>`, "Since boot", "net")}
       </div>
       <div class="facts cells">
@@ -895,6 +931,51 @@ class PiVitalsCard extends HTMLElement {
       </div>
       ${cfg.footer ? `<div class="foot">${cfg.footer}</div>` : ""}${vitalsHint}
     </details>`;
+
+    // part panel: the board part someone picked, with its live readings (tap one for its history) and its specs
+    const pdEl = this.shadowRoot.querySelector(".pd"), f2 = this.shadowRoot.querySelector(".facts2");
+    if (this.pvPart && isPi) {
+      const det = (sfx, title, dec, range, extra = "") => { const id = sfx && (sfx.includes(".") ? sfx : this.S(sfx)); return id && H[id] ? `${id}|${title}|${extra === "|t" ? "climate" : "infra"}|${dec}|${range}${extra}` : ""; };
+      const q = t => `<span class="qu">${t}</span>`, tv = tC == null ? "—" : Math.round(this.tC2D(tC)) + " " + tUnit;
+      const flagsTxt = l => l.length ? l.map(f => flagName[f] || f).join(", ") : "None";
+      const net = sfx => { const x = n(sfx); return x == null ? "—" : `${fmt(x, "MB/s")} ${unit(x, "MB/s")}`; };
+      const pi5 = /Pi 5/.test(model), ramGb = memTot ? Math.round(memTot / 1024) : null;
+      const P = {
+        board: { meta: VA.model || model, live: [["Status", verdict, ""], ["Up", up || "—", "since boot"], ["Board power", watts != null ? watts.toFixed(2) + " W" : "—", "now", det(R.vitals, "Pi board power", 2, "6H")], ["CPU", cpu == null ? "—" : Math.round(cpu) + "%", "now", det("processor_use", "CPU", 0, "6H")], ["Temperature", tv, "now", det("processor_temperature", "CPU temperature", 1, "6H", "|t")]],
+          specs: pi5 ? [["Processor", "Broadcom BCM2712, 4× Cortex-A76 at 2.4 GHz"], ["Graphics", "VideoCore VII"], ["Memory", (ramGb ? ramGb + " GB " : "") + "LPDDR4X-4267"], ["Wireless", "Wi-Fi 5 (dual band), Bluetooth 5.0"], ["Ethernet", "Gigabit, PoE+ with a HAT"], ["USB", "2× USB 3.0, 2× USB 2.0"], ["Video", "2× micro-HDMI, 4K at 60 Hz"], ["Storage", "microSD; PCIe 2.0 ×1 for an NVMe SSD"], ["Power", "USB-C, 5 V at up to 5 A"], ["Size", "85 × 56 mm"]] : [] },
+        soc: { meta: pi5 ? "Broadcom BCM2712" : "Processor", live: [["CPU use", cpu == null ? "—" : Math.round(cpu) + "%", "now", det("processor_use", "CPU", 0, "6H")], ["Temperature", tv, "now", det("processor_temperature", "CPU temperature", 1, "6H", "|t")],
+            ["Clock", VA.arm_mhz ? VA.arm_mhz.toLocaleString() + " MHz" : "—", "now"], ["Load", l1 != null ? l1.toFixed(2) : "—", "1-min avg", det("load_1_min", "Load · 1 min", 2, "6H")], ["Throttling", flagsTxt(tNow), "now"], ["Throttled", flagsTxt(tBoot), "since boot"]],
+          specs: pi5 ? [["Cores", "4× Arm Cortex-A76, 64-bit"], ["Top speed", "2,400 MHz"], ["Cache", "512 KB L2 per core, 2 MB L3"], ["Graphics", "VideoCore VII, OpenGL ES 3.1, Vulkan 1.2"], ["Throttles", `From ${Math.round(this.tC2D(80))} ${tUnit} (harder at ${Math.round(this.tC2D(85))} ${tUnit})`]] : [] },
+        ram: { meta: ramGb ? ramGb + " GB" : "Memory", live: [["Used", memUse != null ? `${gb(memUse)} of ${gb(memTot)} GB · ${Math.round(mem)}%` : "—", "now", det("memory_usage", "Memory", 0, "6H")],
+            ...(T.norm.mem ? [["Typical", Math.round(T.norm.mem.mu) + "%", "7-day avg"]] : []), ["Swap", swapUse != null ? Math.round(swapUse) + " MB" : "—", "now", det("swap_usage", "Swap", 0, "24H")]],
+          specs: pi5 ? [["Type", "LPDDR4X-4267 SDRAM"], ["Size", ramGb ? ramGb + " GB" : "—"], ["Shared with", "Graphics (VideoCore VII)"]] : [] },
+        fan: { meta: fan ? "Spinning" : "Idle", live: [["Speed", fan == null ? "—" : fan ? Math.round(fan).toLocaleString() + " rpm" : "Idle", "now", det(this.S("pwmfan_fan_speed") ? "pwmfan_fan_speed" : "fan_speed", "Fan speed", 0, "6H")], ["Of full speed", fan == null ? "—" : Math.round(fan / cfg.fan_max_rpm * 100) + "%", "now"], ["CPU temperature", tv, "now"]],
+          specs: pi5 ? [["Connector", "4-pin PWM fan header"], ["Firmware curve", `Starts at ${Math.round(this.tC2D(50))} ${tUnit}, steps up at ${Math.round(this.tC2D(60))} and ${Math.round(this.tC2D(67.5))}, full speed at ${Math.round(this.tC2D(75))} ${tUnit}`], ["Full speed", "~" + cfg.fan_max_rpm.toLocaleString() + " rpm (card setting)"]] : [] },
+        sd: { meta: devKind(VA.disk_device) || "Boot disk", live: [["Used", dUse != null ? `${dUse.toFixed(1)} of ${dTot.toFixed(0)} GB` : "—", "now", det("disk_usage", "Disk", 1, "7D")], ["Disk full", daysLeft == null ? (forecast || "—") : "~" + fullIn(daysLeft), daysLeft == null ? "" : `at +${slope.toFixed(2)} GB/day`],
+            ...(VA.db_mb != null ? [["Database", mb(VA.db_mb), "now"], ["Database growth", VA.db_mb_per_day != null ? (VA.db_mb_per_day >= 0 ? "+" : "−") + Math.abs(VA.db_mb_per_day) + " MB/day" : "—", "7-day avg"]] : []),
+            ...(VA.disk_written_gb != null ? [["Written", VA.disk_written_gb + " GB", "since boot"], ["Writing", (VA.disk_write_kbs ?? "—") + " kB/s", "30-s avg"]] : [])],
+          specs: pi5 ? [["Slot", "microSD, SDR104 (about 100 MB/s)"], ["Device", VA.disk_device || "—"], ["Better option", "An NVMe SSD on the PCIe port lasts far longer under constant writes"]] : [] },
+        power: { meta: "USB-C", live: [["Board power", watts != null ? watts.toFixed(2) + " W" : "—", "now", det(R.vitals, "Pi board power", 2, "6H")], ["Supply", uvNow ? "Under-voltage" : "Steady", "now"], ["Dips", uvBoot ? "Yes" : "None", "since boot"]],
+          specs: pi5 ? [["Input", "USB-C, 5 V at up to 5 A, USB Power Delivery"], ["Official supply", "27 W (5.1 V, 5 A)"], ["On a 3 A supply", "USB ports are limited to 600 mA total"], ["Power chip", "Renesas DA9091"], ["Measured", "Board rails only; USB devices and supply losses add to wall draw"]] : [] },
+        wifi: { meta: wired ? "Not in use" : dbm != null ? (dbm > -60 ? "Excellent" : dbm > -70 ? "Good" : dbm > -75 ? "Fair" : "Weak") : "Wireless", live: wired ? [["Network", "Ethernet in use", ""]] : [["Signal", dbm != null ? String(dbm).replace("-", "−") + " dBm" : "—", "now"], ["Down", net(`network_throughput_in_${ifc}`), "now", det(`network_throughput_in_${ifc}`, "Wi-Fi down", 3, "6H")], ["Up", net(`network_throughput_out_${ifc}`), "now", det(`network_throughput_out_${ifc}`, "Wi-Fi up", 3, "6H")], ["Address", ipv4 ?? "—", ifc]],
+          specs: pi5 ? [["Chip", "Infineon CYW43455"], ["Wi-Fi", "802.11ac, 2.4 and 5 GHz"], ["Bluetooth", "5.0 and Bluetooth Low Energy"]] : [] },
+        eth: { meta: wired ? "In use" : "Not connected", live: wired ? [["Down", net(`network_throughput_in_${ifc}`), "now", det(`network_throughput_in_${ifc}`, "Network down", 3, "6H")], ["Up", net(`network_throughput_out_${ifc}`), "now", det(`network_throughput_out_${ifc}`, "Network up", 3, "6H")], ["Address", ipv4 ?? "—", ifc]] : [["Network", "The Pi is on Wi-Fi", ""]],
+          specs: pi5 ? [["Speed", "Gigabit"], ["Power over Ethernet", "PoE+ with an add-on HAT"], ["Tip", "A cable is the most reliable link for a home hub"]] : [] },
+        usb: { meta: "4 ports", live: [], note: "Home Assistant doesn't report what's plugged in or how much power each port draws.",
+          specs: pi5 ? [["Blue ports", "2× USB 3.0, 5 Gbps each, at the same time"], ["Black ports", "2× USB 2.0"], ["Power", "1.6 A shared on a 5 A supply, 600 mA on 3 A"], ["Controller", "RP1"]] : [] },
+        hdmi: { meta: "2 ports", live: [], note: "Home Assistant OS runs without a screen, so these are unused.", specs: pi5 ? [["Ports", "2× micro-HDMI"], ["Output", "Two 4K displays at 60 Hz, HDR"]] : [] },
+        rp1: { meta: "I/O controller", live: [], note: "No sensors of its own; its work shows up in the USB, network and GPIO readings.", specs: pi5 ? [["Made by", "Raspberry Pi (their own chip)"], ["Handles", "USB, Ethernet, GPIO, camera and display links"], ["Link to processor", "PCIe 2.0 ×4"]] : [] },
+        gpio: { meta: "40 pins", live: [], note: "Free for add-on boards and sensors. Nothing is reading these pins.", specs: pi5 ? [["Header", "40-pin, 3.3 V logic"], ["Buses", "UART, I²C, SPI, PWM, PCM audio"], ["Power pins", "5 V and 3.3 V"]] : [] },
+      }[this.pvPart];
+      const row = ([k, v, qq, d]) => `<div class="kvr${d ? " lk" : ""}"${d ? ` data-detail="${d}" role="button" tabindex="0"` : ""}><span>${k}</span><b>${v}${qq ? " " + q(qq) : ""}${d ? `<svg class="rc" viewBox="0 0 16 16" aria-hidden="true"><path d="M6.5 4l4 4-4 4"/></svg>` : ""}</b></div>`;
+      pdEl.innerHTML = `<div class="pdh"><b>${PV_PARTS[this.pvPart][0].toUpperCase() + PV_PARTS[this.pvPart].slice(1)}</b><span class="m">${P.meta}</span>
+          <button class="pdx" aria-label="Close" data-part-close><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8"/></svg></button></div>
+        <div class="pdg">
+          <div class="pdc"><div class="pdk">Live</div>${P.live.length ? `<div class="kvs">${P.live.map(row).join("")}</div>` : ""}${P.note ? `<div class="pdn">${P.note}</div>` : ""}</div>
+          ${P.specs.length ? `<div class="pdc"><div class="pdk">Specs</div><div class="kvs">${P.specs.map(([k, v]) => `<div class="kvr"><span>${k}</span><b class="sp">${v}</b></div>`).join("")}</div></div>` : ""}
+        </div>`;
+      pdEl.hidden = false; f2.hidden = true;
+    } else { pdEl.hidden = true; f2.hidden = false; }
 
     const body = this.shadowRoot.querySelector(".body");
     body.innerHTML = `${setup}
@@ -913,6 +994,9 @@ class PiVitalsCard extends HTMLElement {
   }
 }
 const PV_WINDOW = 10 * 60e3;
+// board parts, in the words the part panel uses
+const PV_PARTS = { board: "whole board", soc: "processor", ram: "memory", fan: "cooling fan", sd: "boot disk", power: "power input", wifi: "Wi-Fi and Bluetooth",
+  eth: "Ethernet port", usb: "USB ports", hdmi: "micro-HDMI ports", rp1: "RP1 I/O controller", gpio: "GPIO header" };
 if (!customElements.get("pi-vitals-card")) customElements.define("pi-vitals-card", PiVitalsCard);
 window.customCards = window.customCards || [];
 if (!window.customCards.some(c => c.type === "pi-vitals-card")) window.customCards.push({ type: "pi-vitals-card", name: "Pi Vitals", description: "Raspberry Pi health at a glance: board status, gauges, live sparklines, storage wear, throttling, backups and updates.", preview: true, documentationURL: "https://github.com/samansabeti/pi-vitals-card" });

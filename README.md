@@ -4,10 +4,11 @@ A Raspberry Pi health dashboard for Home Assistant, in a single card. It's built
 
 ![Pi Vitals card](images/pi-vitals-light.png)
 
-- **A live board drawing.** A line-art Pi whose parts light up from real data: the processor takes the temperature color, the cooler spins at the real fan speed, the power LED turns red on under-voltage, the Wi-Fi arcs show signal strength, and the SD slot blinks while the Pi writes to it.
+- **A live, clickable board drawing.** Parts light up from real data (processor temperature on the chip, RAM fills with use, fan spins at real speed, LED red on under-voltage, Wi-Fi arcs, SD blinks on writes). Tap any part for its live readings (each opens its history) and its Pi 5 specs.
 - **A verdict with its reasons.** "All systems normal" (or the worst problem), plus status facts beside the board: power, throttling, storage, backups, updates, Wi-Fi.
 - **Ring gauges** for CPU, memory, disk and temperature, each compared with its own 7-day normal ("Usually 4%", or "Above usual" when it's well outside its normal swing). Disk shows when it would be full at its typical daily growth. Tap one for its history.
-- **Live sparklines** covering the last 10 minutes. Hover (or drag on a phone) to read any moment; click one for its longer history (so do Apps rows).
+- **Live sparklines** covering the last 10 minutes. Hover (or drag on a phone) and the big number shows that moment, with its time; click one for its longer history (so do Apps rows).
+- **Every number says what it is:** `now` for the latest reading, or its window (`1-min avg`, `7-day avg`, `since boot`).
 - **Storage wear.** Disk use, a disk-full forecast, database size and daily growth, data written since boot, and the write rate now.
 - **Power & performance.** Throttle flags (now and since boot), measured CPU clock, fan speed, Wi-Fi signal.
 - **Backups, updates and apps.** Only pending updates are listed, plus each app's CPU and RAM. The Backups and Updates facts open those Settings pages.
