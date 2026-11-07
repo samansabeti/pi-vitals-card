@@ -128,7 +128,7 @@ class PiVitalsCard extends HTMLElement {
   constructor() { super(); this.attachShadow({ mode: "open" }); this.buf = {}; this.seen = {}; this.sig = ""; this.boardSig = ""; this.built = false; }
   setConfig(c) {
     PiVitalsCard.check(c || {});
-    this.config = { ...PV_DEFAULTS, ...(c || {}) };
+    this.config = { ...PV_DEFAULTS, ...(c || {}), vitals_entity_set: !!c?.vitals_entity };
     this.legacy = !!this.config.prefix;
     this.P = this.config.prefix || "sensor.system_monitor_";
     this.R = null;
@@ -222,6 +222,7 @@ class PiVitalsCard extends HTMLElement {
         if (k) (R.sm[k] ||= []).push(e.entity_id);
       } else if (e.platform === "backup" && e.translation_key) R.backup[e.translation_key] = e.entity_id;
       else if (e.platform === "rpi_power") R.rpiPower = e.entity_id;
+      else if (e.platform === "pi_vitals" && e.translation_key === "board_power") R.pvPower = e.entity_id;
       else if (e.platform === "hassio" && e.device_id) (R.devs[e.device_id] ||= {})[e.entity_id.startsWith("binary_sensor.") ? "running" : e.translation_key] = e.entity_id;
     }
     for (const k in R.sm) R.sm[k].sort((a, b) => a.length - b.length || a.localeCompare(b));
@@ -235,7 +236,7 @@ class PiVitalsCard extends HTMLElement {
       else if (d.disk_total) R.sys.host = d;
     }
     R.apps.sort((a, b) => a.name.localeCompare(b.name));
-    R.vitals = h.states[this.config.vitals_entity] ? this.config.vitals_entity
+    R.vitals = R.pvPower && !this.config.vitals_entity_set ? R.pvPower : h.states[this.config.vitals_entity] ? this.config.vitals_entity
       : Object.keys(h.states).find(k => k.startsWith("sensor.") && h.states[k].attributes?.rails && "throttled" in h.states[k].attributes) || this.config.vitals_entity;
     R.power = h.states[this.config.power_status_entity] ? this.config.power_status_entity : R.rpiPower;
     R.hasSM = !this.legacy && Object.keys(R.sm).length > 0;
@@ -295,6 +296,7 @@ class PiVitalsCard extends HTMLElement {
     if (this.R.hasSM && now - (this.histT || 0) > 5 * 60e3) { this.histT = now; this.loadHistory(); }
     if (now - (this.usbT || 0) > 60e3) { this.usbT = now; this.loadUsb(); }
     if (!this.hwT) { this.hwT = now; this.loadHw(); }
+    if (this.R.pvPower && now - (this.pvdT || 0) > Math.max(10, this.pvd?.interval || 30) * 1000) { this.pvdT = now; this.loadDetails(); }
     const W = this.R.watch, ids = Object.keys(h.states).filter(k => k.startsWith("update.") || W.has(k) || (!this.R.hasSM && k.startsWith(this.P)));
     const sig = ids.map(k => h.states[k].last_updated).join() + ids.length;
     if (sig !== this.sig) { this.sig = sig; this.render(); }
@@ -777,6 +779,10 @@ class PiVitalsCard extends HTMLElement {
       ${part("rp1", "RP1 I/O controller", "", [122, 49, 18, 27], `<rect class="pt" x="124" y="51" width="14" height="14" rx="1.5"/><text class="lbl" x="131" y="73" text-anchor="middle">RP1</text>`)}
     </svg>`;
   }
+  // Live details from the Pi Vitals integration. They aren't entity attributes, so they add nothing to history.
+  async loadDetails() {
+    try { this.pvd = await this._hass.callWS({ type: "pi_vitals/details" }); this.render(); } catch (e) { this.pvd = null; }
+  }
   // Board name from Home Assistant's own hardware info ("Raspberry Pi 5"), so the model is known without the pi_vitals sensor.
   async loadHw() {
     try { const r = await this._hass.callWS({ type: "hardware/info" }); this.hwModel = (r.hardware || []).map(h => h.name).find(n => n) || null; }
@@ -799,7 +805,8 @@ class PiVitalsCard extends HTMLElement {
     const cfg = this.config, C = this.C, H = this._hass.states, R = this.R, S = this.settings(), tUnit = "°" + S.temperature_unit;
     const n = id => this.n(this.S(id)), v = id => this.v(this.S(id));
     const hn = id => { const x = parseFloat(H[id]?.state); return Number.isFinite(x) ? x : null; };
-    const VA = H[R.vitals]?.attributes || {}, watts = hn(R.vitals);
+    // live details: from the Pi Vitals integration (websocket, nothing recorded), else the pi_vitals.py sensor's attributes
+    const VA = (R.pvPower && this.pvd) || H[R.vitals]?.attributes || {}, watts = hn(R.vitals) ?? VA.watts ?? null;
     const cores = cfg.cores;
     const cpu = n("processor_use"), mem = n("memory_usage"), disk = n("disk_usage"), tRaw = n("processor_temperature");
     const tU = H[this.S("processor_temperature")]?.attributes?.unit_of_measurement || "°C", isF = /F/.test(tU);
@@ -990,7 +997,7 @@ class PiVitalsCard extends HTMLElement {
     const setup = this.legacy || R.noRegistry ? "" : !R.hasSM
       ? `<div class="setup"><ha-icon icon="mdi:wrench-outline"></ha-icon><div><b>Add the System Monitor integration</b> (Settings → Devices & services → Add integration → System Monitor), then turn on its sensors: most are off by default. <a data-nav="/config/integrations/dashboard">Open integrations ›</a></div></div>`
       : missing.length ? `<div class="setup"><ha-icon icon="mdi:toggle-switch-off-outline"></ha-icon><div><b>${missing.length === 1 ? "1 sensor is" : missing.length + " sensors are"} off:</b> ${missing.join(", ")}. Turn ${missing.length === 1 ? "it" : "them"} on in System Monitor's entity list. ${smLink}</div></div>` : "";
-    const vitalsHint = isPi && !H[R.vitals] ? `<div class="foot">Board power, throttling, CPU clock and SD-card wear come from the optional pi_vitals sensor (see the card's README).</div>` : "";
+    const vitalsHint = isPi && !H[R.vitals] ? `<div class="foot">Board power, throttling, CPU clock and SD-card wear come from the optional Pi Vitals integration (Settings → Devices &amp; services → Add integration → Pi Vitals).</div>` : "";
     // more details drawer
     const psiChip = x => x == null ? ["—", C.text3] : x >= 10 ? [x.toFixed(1) + "%", C.bad] : x >= 1 ? [x.toFixed(1) + "%", C.warn] : [x.toFixed(1) + "%", C.ok];
     const pv = (r, w) => n(`${r}_pressure_${w}_average`);
