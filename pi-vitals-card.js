@@ -444,9 +444,7 @@ class PiVitalsCard extends HTMLElement {
       .board .lbl.v,.board .lbl .v{font-size:5.6px;font-weight:600;letter-spacing:.02em;font-variant-numeric:tabular-nums}
       .board .part .lbl.v{fill:${text2}}.board .part.on .lbl.v{fill:${accent}}
       .board .sd.w{animation:blink 1.2s ease-in-out infinite}
-      /* first view: a quick sweep across the parts says "these are tappable" without words */
-      .board.intro .part:not([data-part=board]) .hb{animation:sweep 1.1s ease-in-out calc(var(--i) * 90ms) both}
-      @keyframes sweep{0%,100%{stroke:transparent;fill:transparent}40%{stroke:${accent};fill:color-mix(in srgb, ${accent} 10%, transparent)}}
+      .blg ha-icon{--mdc-icon-size:14px;color:${text3};opacity:.7;margin-left:-4px}
       .board .part{cursor:pointer;outline:none}
       .board .hb{fill:transparent;stroke:transparent;stroke-width:1.2;transition:stroke .12s,fill .12s}
       .board .part[data-part=board] .hb{stroke-width:0}
@@ -509,7 +507,7 @@ class PiVitalsCard extends HTMLElement {
       .pb{padding:0 14px}
       .pulse{flex:none;width:7px;height:7px;border-radius:50%;background:var(--sh-ok, #1F9D45);animation:p 2s infinite}
       @keyframes p{0%{box-shadow:0 0 0 0 color-mix(in srgb, var(--sh-ok, #1F9D45) 55%, transparent)}70%,100%{box-shadow:0 0 0 6px transparent}}
-      @media (prefers-reduced-motion:reduce){.board .fan,.board .sd.w,.board.intro .hb,.pulse{animation:none}}
+      @media (prefers-reduced-motion:reduce){.board .fan,.board .sd.w,.pulse{animation:none}}
       .sparks{display:grid;grid-template-columns:repeat(6,minmax(0,1fr))}
       .spark{padding:12px 14px}
       .spark[data-detail]{cursor:pointer;transition:background .12s}
@@ -591,7 +589,7 @@ class PiVitalsCard extends HTMLElement {
       /* hover only where there's a real pointer, so a tap doesn't leave a stuck highlight */
       @media (hover:hover){
         .gear:hover{background:${fill};color:${text}}
-        .board .part:hover .hb{stroke:${accent};fill:color-mix(in srgb, ${accent} 6%, transparent)}.board .part[data-part=board]:hover .pcb{stroke:${text2}}
+        .board .part:hover .hb{stroke:${text3};stroke-width:.6}.board .part[data-part=board]:hover .pcb{stroke:${text2}}
         .kvr.lk:hover{background:${hover}}
         .fx.lk:hover,.evmore:hover,.ring[data-detail]:hover,.spark[data-detail]:hover,details.more summary:hover{background:${hover}}
         .apps tr[data-detail]:hover td{background:${hover}}
@@ -843,8 +841,7 @@ class PiVitalsCard extends HTMLElement {
     const bsig = JSON.stringify(bs);
     const boardEl = this.shadowRoot.querySelector(".board");
     boardEl.hidden = !isPi; this.shadowRoot.querySelector(".hero").classList.toggle("solo", !isPi);
-    if (isPi && !this.introDone) { this.introDone = true; boardEl.classList.add("intro"); setTimeout(() => boardEl.classList.remove("intro"), 2600); }
-    if (isPi && bsig !== this.boardSig) { this.boardSig = bsig; boardEl.innerHTML = this.board(bs) + `<div class="blg"><span><i class="on"></i>In use</span><span><i class="off"></i>Not in use</span></div>`; }
+    if (isPi && bsig !== this.boardSig) { this.boardSig = bsig; boardEl.innerHTML = this.board(bs) + `<div class="blg"><span><i class="on"></i>In use</span><span><i class="off"></i>Not in use</span><ha-icon icon="mdi:gesture-tap" title="Tap a part for details" aria-hidden="true"></ha-icon></div>`; }
 
     // header (model, uptime, verdict badge, settings) and the status facts beside the board
     const fx = [];
