@@ -939,7 +939,7 @@ class PiVitalsCard extends HTMLElement {
         ${forecast ? kvr("Disk full", daysLeft == null ? "Not filling up" : `<span${fColor ? ` style="color:${fColor}"` : ""}>~${fullIn(daysLeft)}</span> <span class="x">at +${slope.toFixed(2)} GB/day</span>`, "forecast") : ""}
         ${VA.db_mb != null ? kvr("Database", `${mb(VA.db_mb)} <span class="x">now</span>`, "db") + kvr("DB growth", VA.db_mb_per_day != null ? `${VA.db_mb_per_day >= 0 ? "+" : "−"}${Math.abs(VA.db_mb_per_day)} MB/day <span class="x">7-day avg</span>` : `<span class="x">Shows after 1 day</span>`) : ""}
         ${VA.disk_written_gb != null ? kvr("Written", `${VA.disk_written_gb} GB <span class="x">since boot</span>`, "writes") : ""}
-        ${VA.disk_write_kbs != null ? kvr("Writing", `${VA.disk_write_kbs} kB/s <span class="x">30-s avg</span>`, "writes") : ""}
+        ${VA.disk_write_kbs != null ? kvr("Writing", `${VA.disk_write_kbs} kB/s <span class="x">10-min avg</span>`, "writes") : ""}
         ${kvr("Swap", `${swapUse != null ? Math.round(swapUse) : "—"} MB <span class="x">${swap ?? "—"}% now</span>`, "swap")}
       </div>`, devKind(VA.disk_device) || "");
     const flagName = { under_voltage: "Under-voltage", freq_capped: "Capped", throttled: "Throttled", soft_temp_limit: "Soft temp limit" };
@@ -1053,7 +1053,7 @@ class PiVitalsCard extends HTMLElement {
           specs: pi5 ? [["Connector", "4-pin PWM fan header"], ["Firmware curve", `Starts at ${Math.round(this.tC2D(50))} ${tUnit}, steps up at ${Math.round(this.tC2D(60))} and ${Math.round(this.tC2D(67.5))}, full speed at ${Math.round(this.tC2D(75))} ${tUnit}`], ["Full speed", "~" + cfg.fan_max_rpm.toLocaleString() + " rpm (card setting)"]] : [] },
         sd: { meta: devKind(VA.disk_device) || "Boot disk", live: [["Used", dUse != null ? `${dUse.toFixed(1)} of ${dTot.toFixed(0)} GB` : "—", "now", det("disk_usage", "Disk", 1, "7D")], ["Disk full", daysLeft == null ? (forecast || "—") : "~" + fullIn(daysLeft), daysLeft == null ? "" : `at +${slope.toFixed(2)} GB/day`],
             ...(VA.db_mb != null ? [["Database", mb(VA.db_mb), "now"], ["Database growth", VA.db_mb_per_day != null ? (VA.db_mb_per_day >= 0 ? "+" : "−") + Math.abs(VA.db_mb_per_day) + " MB/day" : "—", "7-day avg"]] : []),
-            ...(VA.disk_written_gb != null ? [["Written", VA.disk_written_gb + " GB", "since boot"], ["Writing", (VA.disk_write_kbs ?? "—") + " kB/s", "30-s avg"]] : [])],
+            ...(VA.disk_written_gb != null ? [["Written", VA.disk_written_gb + " GB", "since boot"], ["Writing", (VA.disk_write_kbs ?? "—") + " kB/s", "10-min avg"]] : [])],
           specs: pi5 ? [["Slot", "microSD, SDR104 (about 100 MB/s)"], ["Device", VA.disk_device || "—"], ["Better option", "An NVMe SSD on the PCIe port lasts far longer under constant writes"]] : [] },
         power: { meta: "USB-C", live: [["Board power", watts != null ? watts.toFixed(2) + " W" : "—", "now", det(R.vitals, "Pi board power", 2, "6H")], ["Supply", uvNow ? "Under-voltage" : "Steady", "now"], ["Dips", uvBoot ? "Yes" : "None", "since boot"]],
           specs: pi5 ? [["Input", "USB-C, 5 V at up to 5 A, USB Power Delivery"], ["Official supply", "27 W (5.1 V, 5 A)"], ["On a 3 A supply", "USB ports are limited to 600 mA total"], ["Power chip", "Renesas DA9091"], ["Measured", "Board rails only; USB devices and supply losses add to wall draw"]] : [] },

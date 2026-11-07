@@ -11,23 +11,30 @@ Prints one JSON object; the sensor's state is `watts`, everything else becomes a
   flag appeared between two runs without being seen live. Lets a dashboard show episodes without attribute history.
 - arm_mhz: measured CPU clock.
 - wifi_dbm: signal from /proc/net/wireless (HA core uses the host network).
-- disk_*: block-device writes since boot and the write rate since the last run.
-- db_mb, db_mb_per_day: recorder database size and its average daily growth (log kept next to this script).
+- disk_*: writes since boot to the disk that holds the config folder, and the recent write rate.
+- db_mb, db_mb_per_day: SQLite recorder database size and its average daily growth (MariaDB/Postgres: left out).
 Every part is optional: a part that fails is left out instead of failing the sensor.
+
+Light on the SD card: the small state file next to this script is rewritten only when something worth keeping
+changes (a throttle flag, a new day for the database log) or every SAVE_EVERY seconds for the write-rate sample,
+not on every run.
 """
 import array
 import fcntl
 import json
 import os
 import re
+import struct
 import time
 
 MAX = 1024
 GET_GENCMD_RESULT = 0x00030080
-IOCTL_MBOX_PROPERTY = 0xC0086400  # _IOWR(100, 0, char *) on 64-bit
+IOCTL_MBOX_PROPERTY = 0xC0006400 | struct.calcsize("P") << 16  # _IOWR(100, 0, char *): 0xC0086400 on 64-bit, 0xC0046400 on 32-bit
 HERE = os.path.dirname(os.path.abspath(__file__))
-DB = "/config/home-assistant_v2.db"
+CONFIG = os.environ.get("HA_CONFIG") or (os.path.dirname(HERE) if os.path.exists(os.path.join(os.path.dirname(HERE), "configuration.yaml")) else "/config")
+DB = os.path.join(CONFIG, "home-assistant_v2.db")
 STATE = os.path.join(HERE, ".pi_vitals_state.json")
+SAVE_EVERY = 600  # seconds between write-rate samples saved to the state file
 FLAGS = {0: "under_voltage", 1: "freq_capped", 2: "throttled", 3: "soft_temp_limit"}
 
 
@@ -50,8 +57,13 @@ def power():
     return {"watts": round(sum(rails.values()), 2), "rails": rails} if rails else {}
 
 
+def read(path):
+    with open(path) as f:
+        return f.read()
+
+
 def model():
-    return {"model": open("/proc/device-tree/model").read().strip("\0\n ")}
+    return {"model": read("/proc/device-tree/model").strip("\0\n ")}
 
 
 def throttled():
@@ -66,7 +78,7 @@ def throttle_events(result, state, now):
     if not thr:
         return {}
     try:
-        boot = open("/proc/sys/kernel/random/boot_id").read().strip()
+        boot = read("/proc/sys/kernel/random/boot_id").strip()
     except OSError:
         boot = ""
     prev = state.get("thr")
@@ -85,57 +97,71 @@ def clock():
 
 
 def wifi():
-    for line in open("/proc/net/wireless").read().splitlines()[2:]:
+    for line in read("/proc/net/wireless").splitlines()[2:]:
         name, rest = line.split(":", 1)
         return {"wifi_dbm": round(float(rest.split()[2].rstrip("."))), "wifi_iface": name.strip()}
     return {}
 
 
+def config_disk():
+    """Whole disk holding the config folder (mmcblk0, nvme0n1, sda), from the folder's device number."""
+    st = os.stat(CONFIG)
+    part = os.path.realpath(f"/sys/dev/block/{os.major(st.st_dev)}:{os.minor(st.st_dev)}")
+    name = os.path.basename(part)
+    return os.path.basename(os.path.dirname(part)) if os.path.exists(os.path.join(part, "partition")) else name
+
+
 def disk(state, now):
-    # root device = the disk holding /config; take the whole-disk line (mmcblk0, nvme0n1, sda)
-    dev = None
-    for line in open("/proc/diskstats"):
-        f = line.split()
-        if re.fullmatch(r"mmcblk\d+|nvme\d+n\d+|sd[a-z]", f[2]):
-            dev, sectors = f[2], int(f[9])
-            break
-    if not dev:
+    try:
+        want = config_disk()
+    except OSError:
+        want = None
+    stats = {f[2]: int(f[9]) for f in (line.split() for line in read("/proc/diskstats").splitlines())}
+    if want not in stats:  # e.g. an overlay or network mount: fall back to the first SD / NVMe / USB disk
+        want = next((d for d in stats if re.fullmatch(r"mmcblk\d+|nvme\d+n\d+|sd[a-z]", d)), None)
+    if not want:
         return {}
-    out = {"disk_device": dev, "disk_written_gb": round(sectors * 512 / 1e9, 2)}
+    sectors = stats[want]
+    out = {"disk_device": want, "disk_written_gb": round(sectors * 512 / 1e9, 2)}
     last = state.get("disk")
-    if last and last["dev"] == dev and now > last["t"] and sectors >= last["s"]:
+    if last and last["dev"] == want and now > last["t"] and sectors >= last["s"]:
         out["disk_write_kbs"] = round((sectors - last["s"]) * 512 / 1e3 / (now - last["t"]), 1)
-    state["disk"] = {"dev": dev, "t": now, "s": sectors}
+    if not last or last["dev"] != want or sectors < last["s"] or now - last["t"] >= SAVE_EVERY:
+        state["disk"] = {"dev": want, "t": now, "s": sectors}
     return out
 
 
 def database(state, now):
     size = sum(os.path.getsize(DB + x) for x in ("", "-wal") if os.path.exists(DB + x)) / 1e6
-    log = state.setdefault("db_log", {})  # one reading per day, last 8 days
-    log[time.strftime("%Y-%m-%d", time.localtime(now))] = round(size, 1)
+    log = state.setdefault("db_log", {})  # first reading of each day, last 8 days
+    log.setdefault(time.strftime("%Y-%m-%d", time.localtime(now)), round(size, 1))
     for d in sorted(log)[:-8]:
         del log[d]
     out = {"db_mb": round(size, 1)}
     days = sorted(log)
     if len(days) >= 2:
         span = (time.mktime(time.strptime(days[-1], "%Y-%m-%d")) - time.mktime(time.strptime(days[0], "%Y-%m-%d"))) / 86400
-        out["db_mb_per_day"] = round((log[days[-1]] - log[days[0]]) / span, 1)
+        out["db_mb_per_day"] = round((size - log[days[0]]) / (span + (now - time.mktime(time.strptime(days[-1], "%Y-%m-%d"))) / 86400), 1)
     return out
 
 
 now = time.time()
 try:
-    state = json.load(open(STATE))
+    state = json.loads(read(STATE))
 except (OSError, ValueError):
     state = {}
+before = json.dumps(state, sort_keys=True)
 result = {}
 for part in (model, power, throttled, lambda: throttle_events(result, state, now), clock, wifi, lambda: disk(state, now), lambda: database(state, now)):
     try:
         result.update(part())
     except Exception:  # noqa: BLE001 - a missing source just drops that field
         pass
-try:
-    json.dump(state, open(STATE, "w"))
-except OSError:
-    pass
+if json.dumps(state, sort_keys=True) != before:  # skip the write when nothing worth keeping changed
+    try:
+        with open(STATE + ".tmp", "w") as f:
+            json.dump(state, f)
+        os.replace(STATE + ".tmp", STATE)
+    except OSError:
+        pass
 print(json.dumps(result))
