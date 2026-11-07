@@ -205,7 +205,8 @@ class PiVitalsCard extends HTMLElement {
       if (el) { e.stopPropagation(); if (this.tipPin && this.tipEl?.dataset.tip === el.dataset.tip) hide(); else { show(el); this.tipPin = true; } }
       else if (this.tipPin) hide();
     }, true);
-    this.onScroll = () => { if (this.tipEl) hide(); };
+    // any scroll on the page (window or a scrolling container): close tips, and hold redraws until it settles
+    this.onScroll = () => { this.scrollT = Date.now(); if (this.tipEl) hide(); };
     if (this.isConnected) addEventListener("scroll", this.onScroll, { passive: true, capture: true });
   }
   v(id) { const s = this._hass.states[id]; return s && !["unknown", "unavailable"].includes(s.state) ? s.state : null; }
@@ -641,6 +642,9 @@ class PiVitalsCard extends HTMLElement {
       @container card (max-width:520px){.sparks{grid-template-columns:repeat(2,minmax(0,1fr))}.apps td:first-child .sub,.apps .pt,.blurb,.upt,.head .tile{display:none}
         .apps .pill{padding:0 6px;gap:0}.apps td,.apps th{padding-left:8px}.ring{flex-direction:column;align-items:flex-start;gap:8px;padding:12px}.ring svg{width:44px;height:44px}.ring .rt{padding-right:0;width:100%}.num b{font-size:22px}}
     </style><ha-card><div class="head"><div class="hl"></div><button class="gear" aria-label="Settings" aria-haspopup="dialog" aria-expanded="false"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 4.5h6M11.5 4.5h2M2.5 11.5h2M7.5 11.5h6"/><circle cx="10" cy="4.5" r="1.5"/><circle cx="6" cy="11.5" r="1.5"/></svg></button></div><div class="hero"><div class="board"></div><div class="facts2 cells"></div><div class="pd" hidden></div></div><div class="body"></div><div class="menu" role="dialog" aria-label="Settings"></div><div class="tipbox"></div></ha-card>`;
+    // Sections rewrite their HTML only when it changed, so an update that leaves them as they were touches nothing.
+    for (const el of this.shadowRoot.querySelectorAll(".hl,.facts2,.pd,.body"))
+      Object.defineProperty(el, "pvHTML", { set(h) { if (this.pvLast !== h) { this.pvLast = h; this.innerHTML = h; } } });
     this.wireTips();
     const R1 = this.shadowRoot, release = () => {
       this.pressing = false; this.holdUntil = Date.now() + 400;
@@ -802,6 +806,17 @@ class PiVitalsCard extends HTMLElement {
   render(force) {
     if (!this._hass || !this.config) return;
     if (!force && (this.holdUntil > Date.now() || (this.pressing && Date.now() - this.pressT < 3000))) { this.pending = true; return; }
+    // Don't touch the page while it's scrolling: iOS web views (the HA app) can lose their place when content is
+    // replaced mid-flick. Redraw once it has been still for a second.
+    if (!force && Date.now() - (this.scrollT || 0) < 1000) {
+      this.pending = true; clearTimeout(this.scrollRT);
+      this.scrollRT = setTimeout(() => { if (this.pending) { this.pending = false; this.render(); } }, 1100);
+      return;
+    }
+    const sc = document.scrollingElement, top = sc ? sc.scrollTop : 0;
+    try { this.draw(force); } finally { if (sc && Math.abs(sc.scrollTop - top) > 1) sc.scrollTop = top; }
+  }
+  draw(force) {
     const cfg = this.config, C = this.C, H = this._hass.states, R = this.R, S = this.settings(), tUnit = "°" + S.temperature_unit;
     const n = id => this.n(this.S(id)), v = id => this.v(this.S(id));
     const hn = id => { const x = parseFloat(H[id]?.state); return Number.isFinite(x) ? x : null; };
@@ -904,11 +919,11 @@ class PiVitalsCard extends HTMLElement {
     fx.push([pendingU.length ? C.warn : C.ok, "Updates", pendingU.length ? `${pendingU.length} available` : "All current", pendingU.length ? pendingU.map(u => pvEsc((u.attributes.friendly_name || "").replace(/ update$/i, ""))).join(", ") : `${updates.length} tracked`, "updates"]);
     if (wired) fx.push([C.ok, "Network", "Ethernet", ifc, "net"]);
     else if (dbm != null) fx.push([dbm > -67 ? C.ok : dbm > -75 ? C.warn : C.bad, "Wi-Fi", dbm > -60 ? "Excellent" : dbm > -70 ? "Good" : dbm > -75 ? "Fair" : "Weak", `${String(dbm).replace("-", "−")} dBm now`, "wifi"]);
-    this.shadowRoot.querySelector(".hl").innerHTML = `<span class="tile"><ha-icon icon="${isPi ? "mdi:raspberry-pi" : "mdi:server"}"></ha-icon></span>
+    this.shadowRoot.querySelector(".hl").pvHTML = `<span class="tile"><ha-icon icon="${isPi ? "mdi:raspberry-pi" : "mdi:server"}"></ha-icon></span>
       <div class="ttl"><span class="title">${model}</span>${up ? `<span class="upt">Up ${up}</span>` : ""}</div>
       <span class="status"><i class="dot" style="background:${vColor}"></i><span class="vt">${verdict}</span>${this.tip("status")}</span>`;
     const nav = { backup: "/config/backup", updates: "/config/updates" };
-    this.shadowRoot.querySelector(".facts2").innerHTML = fx.map(([c, k, val, sub, t]) =>
+    this.shadowRoot.querySelector(".facts2").pvHTML = fx.map(([c, k, val, sub, t]) =>
       `<div class="fx${nav[t] ? " lk" : ""}"${nav[t] ? ` data-nav="${nav[t]}" role="link" tabindex="0"` : ""}><div class="k"><i class="dot" style="background:${c}"></i>${k}${this.tip(t)}</div><div class="val">${val}</div><div class="sub" title="${sub}">${sub || "&nbsp;"}</div></div>`).join("");
 
     // gauges
@@ -1075,7 +1090,7 @@ class PiVitalsCard extends HTMLElement {
         gpio: { meta: "40 pins", live: [], note: "Free for add-on boards and sensors. Nothing is reading these pins.", specs: pi5 ? [["Header", "40-pin, 3.3 V logic"], ["Buses", "UART, I²C, SPI, PWM, PCM audio"], ["Power pins", "5 V and 3.3 V"]] : [] },
       }[this.pvPart];
       const row = ([k, v, qq, d]) => `<div class="kvr${d ? " lk" : ""}"${d ? ` data-detail="${d}" role="button" tabindex="0"` : ""}><span>${k}</span><b>${v}${qq ? " " + q(qq) : ""}${d ? `<svg class="rc" viewBox="0 0 16 16" aria-hidden="true"><path d="M6.5 4l4 4-4 4"/></svg>` : ""}</b></div>`;
-      pdEl.innerHTML = `<div class="pdh"><b>${PV_PARTS[this.pvPart][0].toUpperCase() + PV_PARTS[this.pvPart].slice(1)}</b><span class="m">${P.meta}</span>
+      pdEl.pvHTML = `<div class="pdh"><b>${PV_PARTS[this.pvPart][0].toUpperCase() + PV_PARTS[this.pvPart].slice(1)}</b><span class="m">${P.meta}</span>
           <button class="pdx" aria-label="Close" data-part-close><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8"/></svg></button></div>
         <div class="pdg">
           <div class="pdc"><div class="pdk">Live</div>${P.live.length ? `<div class="kvs">${P.live.map(row).join("")}</div>` : ""}${P.note ? `<div class="pdn">${P.note}</div>` : ""}</div>
@@ -1085,7 +1100,7 @@ class PiVitalsCard extends HTMLElement {
     } else { pdEl.hidden = true; f2.hidden = false; }
 
     const body = this.shadowRoot.querySelector(".body");
-    body.innerHTML = `${setup}
+    body.pvHTML = `${setup}
       <div class="rings cells">${gaugesHtml}</div>
       <div class="panel"><div class="ph"><span class="pulse"></span><b>Live</b>${this.tip("live")}<span class="m">Last 10 minutes</span></div><div class="sparks">${sparks}</div></div>
       <div class="grid3">${storage}${perf}${care}</div>
