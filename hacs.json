@@ -1,4 +1,5 @@
 {
   "name": "Pi Vitals",
-  "filename": "pi-vitals-card.js"
+  "filename": "pi-vitals-card.js",
+  "homeassistant": "2025.1.0"
 }

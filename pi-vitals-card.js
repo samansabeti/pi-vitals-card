@@ -4,7 +4,7 @@
 // Reads System Monitor sensors plus the optional pi_vitals.py command_line sensor (power, throttle flags, clock,
 // Wi-Fi signal, SD writes, database growth). Everything optional hides cleanly when its sensor is missing.
 // Sensors are found by integration + translation key, so non-English installs work; `prefix` forces the old English-ID lookup.
-// Colors read Sabeti Home tokens (--sh-*) when present; --pv-accent overrides the data hue. No dependencies.
+// Two styles: Studio (the card's own palette, light and dark) or the viewer's theme; --pv-accent overrides the data hue. No dependencies.
 const PV_VERSION = "1.0.0";
 const PV_DEFAULTS = {
   vitals_entity: "sensor.pi_board_power", power_status_entity: "binary_sensor.raspberry_pi_power_status",
@@ -58,7 +58,7 @@ const PV_TIPS = {
 };
 
 // Settings (gear in the header) are saved per user in Home Assistant's frontend user data, so they follow you to every device.
-// Other cards can follow them: sh-detail-chart's `temperature_unit: pi-vitals` listens for the "pi-vitals-settings" event.
+// Other cards can follow them: a chart card can listen for the "pi-vitals-settings" event. If a companion chart (window.shDetailChart) is loaded, readings open in it; otherwise in HA's more-info dialog.
 window.piVitals = window.piVitals || {
   settings: null,
   load(hass) {
@@ -79,12 +79,12 @@ class PiVitalsCard extends HTMLElement {
   static getConfigForm() {
     const num = (min, max, step = 1, unit) => ({ number: { min, max, step, mode: "box", ...(unit ? { unit_of_measurement: unit } : {}) } });
     const L = {
-      title: "Title", temperature_unit: "Temperature unit", show_apps: "Show the Apps table", backup_note: "Backup note", footer: "Footer note",
+      title: "Title", style: "Style", temperature_unit: "Temperature unit", show_apps: "Show the Apps table", backup_note: "Backup note", footer: "Footer note",
       vitals_entity: "Pi vitals sensor", power_status_entity: "Power supply sensor", interface: "Network interface", prefix: "Entity ID prefix (legacy)",
       temp_warn_c: "Warm from", temp_bad_c: "Hot from", backup_stale_days: "Backups overdue after", cores: "CPU cores", fan_max_rpm: "Fan full speed",
     };
     const H = {
-      title: "Blank shows the board model.", temperature_unit: "Blank follows your Home Assistant unit system. Each person can still switch in the card's Settings.",
+      title: "Blank shows the board model.", style: "Studio is the card's own look (light and dark). My theme uses your dashboard theme's colors. Each person can still switch in the card's Settings.", temperature_unit: "Blank follows your Home Assistant unit system. Each person can still switch in the card's Settings.",
       backup_note: "Added to the backup explanation, e.g. \"Also copied to my NAS.\"", footer: "Small note at the bottom of More details.",
       vitals_entity: "The optional pi_vitals.py sensor. Found automatically when blank.", power_status_entity: "Raspberry Pi Power Supply Checker. Found automatically when blank.",
       interface: "e.g. wlan0, eth0 or end0. Blank picks it automatically.", prefix: "Only if sensors are found wrongly: forces lookup by English entity IDs (e.g. sensor.system_monitor_).",
@@ -93,6 +93,7 @@ class PiVitalsCard extends HTMLElement {
     return {
       schema: [
         { name: "title", selector: { text: {} } },
+        { name: "style", selector: { select: { mode: "dropdown", options: [{ value: "studio", label: "Studio" }, { value: "theme", label: "My theme" }] } } },
         { type: "grid", name: "", schema: [
           { name: "temperature_unit", selector: { select: { mode: "dropdown", options: [{ value: "F", label: "°F" }, { value: "C", label: "°C" }] } } },
           { name: "show_apps", default: true, selector: { boolean: {} } },
@@ -119,30 +120,47 @@ class PiVitalsCard extends HTMLElement {
           { name: "footer", selector: { text: { multiline: true } } },
         ] },
       ],
+      assertConfig: c => PiVitalsCard.check(c),
       computeLabel: s => L[s.name],
       computeHelper: s => H[s.name],
     };
   }
   constructor() { super(); this.attachShadow({ mode: "open" }); this.buf = {}; this.seen = {}; this.sig = ""; this.boardSig = ""; this.built = false; }
   setConfig(c) {
+    PiVitalsCard.check(c || {});
     this.config = { ...PV_DEFAULTS, ...(c || {}) };
     this.legacy = !!this.config.prefix;
     this.P = this.config.prefix || "sensor.system_monitor_";
     this.R = null;
     if (this._hass && this.built) { this.sig = ""; this.boardSig = ""; this.sparkKey = null; this.hass = this._hass; }
   }
+  // Bad values are shown by Home Assistant in place of the card (and keep the visual editor from saving them).
+  static check(c) {
+    const num = (k, min, max) => { if (c[k] != null && !(Number.isFinite(+c[k]) && +c[k] >= min && +c[k] <= max)) throw new Error(`${k} must be a number from ${min} to ${max}`); };
+    num("cores", 1, 64); num("fan_max_rpm", 500, 50000); num("temp_warn_c", 30, 100); num("temp_bad_c", 30, 110); num("backup_stale_days", 1, 365);
+    if (c.temp_warn_c != null && c.temp_bad_c != null && +c.temp_warn_c >= +c.temp_bad_c) throw new Error("temp_warn_c must be below temp_bad_c");
+    if (c.style != null && !["studio", "theme"].includes(c.style)) throw new Error("style must be studio or theme");
+    if (c.temperature_unit != null && !/^°?[CF]$/i.test(String(c.temperature_unit))) throw new Error("temperature_unit must be C or F");
+  }
   connectedCallback() {
-    this.onSet = () => { this.render(true); this.renderMenu(); };
+    if (this.onScroll) addEventListener("scroll", this.onScroll, { passive: true, capture: true });
+    this.onSet = () => { this.applyLook(); this.render(true); this.renderMenu(); };
     this.onDoc = e => { if (this.tipPin && !e.composedPath().includes(this)) this.hideTip?.(); if (this.menuOpen && !e.composedPath().some(n => n.classList?.contains("menu") || n.classList?.contains("gear"))) this.toggleMenu(false); };
     this.onKey = e => { if (e.key === "Escape") { if (this.tipEl) this.hideTip?.(); else if (this.menuOpen) this.toggleMenu(false); else if (this.pvPart) { this.pvPart = null; this.render(true); } } };
     addEventListener("pi-vitals-settings", this.onSet); addEventListener("click", this.onDoc, true); addEventListener("keydown", this.onKey);
   }
-  disconnectedCallback() { removeEventListener("pi-vitals-settings", this.onSet); removeEventListener("click", this.onDoc, true); removeEventListener("keydown", this.onKey); }
+  disconnectedCallback() { if (this.onScroll) removeEventListener("scroll", this.onScroll, { capture: true }); removeEventListener("pi-vitals-settings", this.onSet); removeEventListener("click", this.onDoc, true); removeEventListener("keydown", this.onKey); }
   // viewer's settings, else the card config, else Home Assistant's unit system
   settings() {
     const s = window.piVitals.settings || {}, c = this.config || {};
     const tu = c.temperature_unit ? String(c.temperature_unit).replace("°", "").toUpperCase() : this._hass?.config?.unit_system?.temperature === "°C" ? "C" : "F";
-    return { temperature_unit: s.temperature_unit || tu, tips: s.tips ?? true, apps: s.apps ?? c.show_apps !== false };
+    return { temperature_unit: s.temperature_unit || tu, tips: s.tips ?? true, apps: s.apps ?? c.show_apps !== false, look: s.look || (c.style === "theme" ? "theme" : "studio") };
+  }
+  // Studio follows Home Assistant's dark mode; "My theme" takes every color from the active theme
+  applyLook() {
+    const look = this.settings().look, dark = !!this._hass?.themes?.darkMode;
+    if (this.getAttribute("look") !== look) this.setAttribute("look", look);
+    this.toggleAttribute("dark", dark);
   }
   // °C (what thresholds and the tips are written in) to the display unit
   tC2D(c) { return this.settings().temperature_unit === "F" ? c * 9 / 5 + 32 : c; }
@@ -150,8 +168,8 @@ class PiVitalsCard extends HTMLElement {
   getGridOptions() { return { columns: "full", rows: "auto" }; }
   get C() {
     return {
-      accent: "var(--pv-accent, var(--sh-infra, #2563EB))", climate: "var(--sh-climate, #F27200)", neutral: "var(--sh-neutral, #A1A1A6)",
-      ok: "var(--sh-ok, #1F9D45)", warn: "var(--sh-warn, #D97706)", bad: "var(--sh-bad, #E5302A)", text3: "var(--sh-text-3, var(--secondary-text-color))",
+      accent: "var(--pv-accent, var(--pv-infra))", climate: "var(--pv-climate)", neutral: "var(--pv-neutral)",
+      ok: "var(--pv-ok)", warn: "var(--pv-warn)", bad: "var(--pv-bad)", text3: "var(--pv-text-3)",
     };
   }
   tipCtx() { const c = this.config; return { g: this.gen || 0, cores: c.cores, warn: c.temp_warn_c, bad: c.temp_bad_c }; }
@@ -162,7 +180,7 @@ class PiVitalsCard extends HTMLElement {
       const b = box(); if (!b) return;
       const u = " °" + this.settings().temperature_unit, t = c => Math.round(this.tC2D(c));
       const raw = PV_TIPS[el.dataset.tip] || "", pt = el.dataset.part && this.partTips?.[el.dataset.part];
-      if (pt) { b.textContent = ""; const h = document.createElement("b"); h.textContent = pt[0]; b.append(h, document.createElement("br"), pt[1] || ""); }
+      if (pt) b.innerHTML = `<b>${pt[0]}</b><br>${pt[1] || ""}`; // part summaries are built from escaped values
       else b.textContent = (typeof raw === "function" ? raw(this.tipCtx()) : raw).replace(/\{(\d+)(?:-(\d+))?\}/g, (_, a, z) => t(+a) + (z ? "–" + t(+z) : "") + u)
         + (el.dataset.tip === "backup" && this.config.backup_note ? " " + this.config.backup_note : "");
       b.classList.add("show");
@@ -187,7 +205,8 @@ class PiVitalsCard extends HTMLElement {
       if (el) { e.stopPropagation(); if (this.tipPin && this.tipEl?.dataset.tip === el.dataset.tip) hide(); else { show(el); this.tipPin = true; } }
       else if (this.tipPin) hide();
     }, true);
-    addEventListener("scroll", () => { if (this.tipEl) hide(); }, { passive: true, capture: true });
+    this.onScroll = () => { if (this.tipEl) hide(); };
+    if (this.isConnected) addEventListener("scroll", this.onScroll, { passive: true, capture: true });
   }
   v(id) { const s = this._hass.states[id]; return s && !["unknown", "unavailable"].includes(s.state) ? s.state : null; }
   n(id) { const x = parseFloat(this.v(id)); return Number.isFinite(x) ? x : null; }
@@ -209,7 +228,7 @@ class PiVitalsCard extends HTMLElement {
     for (const e of E) if (e.entity_id.startsWith("update.") && R.devs[e.device_id]) R.devs[e.device_id].update = e.entity_id;
     for (const [id, d] of Object.entries(R.devs)) {
       const dev = h.devices?.[id], name = dev?.name_by_user || dev?.name || "";
-      if (d.running) R.apps.push({ ...d, name: name || "App" });
+      if (d.running) R.apps.push({ ...d, name: pvEsc(name) || "App" });
       else if (/core/i.test(name) && d.cpu_percent) R.sys.core = d;
       else if (/supervisor/i.test(name) && d.cpu_percent) R.sys.supervisor = d;
       else if (/operating system/i.test(name)) R.sys.os = d;
@@ -258,6 +277,7 @@ class PiVitalsCard extends HTMLElement {
   }
   set hass(h) {
     this._hass = h;
+    this.applyLook();
     if (this.modal?.isConnected) this.modal.hass = h;
     if (!this.built) { this.build(); window.piVitals.load(h); }
     this.index(h);
@@ -274,6 +294,7 @@ class PiVitalsCard extends HTMLElement {
     }
     if (this.R.hasSM && now - (this.histT || 0) > 5 * 60e3) { this.histT = now; this.loadHistory(); }
     if (now - (this.usbT || 0) > 60e3) { this.usbT = now; this.loadUsb(); }
+    if (!this.hwT) { this.hwT = now; this.loadHw(); }
     const W = this.R.watch, ids = Object.keys(h.states).filter(k => k.startsWith("update.") || W.has(k) || (!this.R.hasSM && k.startsWith(this.P)));
     const sig = ids.map(k => h.states[k].last_updated).join() + ids.length;
     if (sig !== this.sig) { this.sig = sig; this.render(); }
@@ -368,7 +389,7 @@ class PiVitalsCard extends HTMLElement {
       const et = p.a?.event_type, at = new Date(p.s).getTime();
       if (dead(p.s) || seen.has(p.s) || !at || at < start) continue;
       seen.add(p.s);
-      if (et === "failed") push(at, "bad", "Automatic backup failed", p.a?.failed_reason || "");
+      if (et === "failed") push(at, "bad", "Automatic backup failed", pvEsc(p.a?.failed_reason));
       else if (et === "completed") done.push(at);
     }
     if (done.length) push(Math.max(...done), "ok", done.length === 1 ? "Backup completed" : `${done.length} backups completed`, done.length > 1 ? "time of the latest" : "");
@@ -378,7 +399,7 @@ class PiVitalsCard extends HTMLElement {
       let v = null;
       for (const p of rows) {
         const iv = p.a?.installed_version;
-        if (iv && v && iv !== v) push(t(p), "accent", `Updated ${p.a.title || (p.a.friendly_name || eid).replace(/ update$/i, "")}`, `${v} → ${iv}`);
+        if (iv && v && iv !== v) push(t(p), "accent", `Updated ${pvEsc(p.a.title || (p.a.friendly_name || eid).replace(/ update$/i, ""))}`, pvEsc(`${v} → ${iv}`));
         if (iv) v = iv;
       }
     }
@@ -386,14 +407,29 @@ class PiVitalsCard extends HTMLElement {
   }
   build() {
     this.built = true;
-    // tokens: Sabeti Home theme (--sh-*) when present, else Home Assistant's own variables
-    const text = "var(--sh-text, var(--primary-text-color))", text2 = "var(--sh-text-2, var(--secondary-text-color))",
-      text3 = "var(--sh-text-3, var(--secondary-text-color))", line = "var(--sh-border, var(--divider-color, rgba(127,127,127,.2)))",
-      fill = "var(--sh-fill, rgba(118,118,128,.12))", raised = "var(--sh-surface-2, rgba(127,127,127,.05))",
-      surface = "var(--sh-surface, var(--card-background-color, #fff))", accent = "var(--pv-accent, var(--sh-infra, #0071E3))",
-      hover = "color-mix(in srgb, var(--sh-text, var(--primary-text-color)) 4%, transparent)";
+    // colors come from --pv-* tokens set on :host by the style: Studio (the card's own look, light and dark) or the viewer's theme
+    const text = "var(--pv-text)", text2 = "var(--pv-text-2)",
+      text3 = "var(--pv-text-3)", line = "var(--pv-border)",
+      fill = "var(--pv-fill)", raised = "var(--pv-surface-2)",
+      surface = "var(--pv-surface)", accent = "var(--pv-accent, var(--pv-infra))",
+      hover = "color-mix(in srgb, var(--pv-text) 4%, transparent)";
     this.shadowRoot.innerHTML = `<style>
-      :host{display:block}
+      :host{display:block;
+        --pv-surface:#FFFFFF;--pv-surface-2:#FAFAFB;--pv-fill:rgba(118,118,128,.12);--pv-border:rgba(0,0,0,.08);
+        --pv-text:#1D1D1F;--pv-text-2:#6E6E73;--pv-text-3:#A1A1A6;--pv-infra:#0071E3;--pv-climate:#F27200;
+        --pv-neutral:#A1A1A6;--pv-ok:#1F9D45;--pv-warn:#D97706;--pv-bad:#E5302A}
+      :host([dark]){--pv-surface:#151517;--pv-surface-2:#1C1C1F;--pv-fill:rgba(118,118,128,.24);--pv-border:rgba(255,255,255,.08);
+        --pv-text:#EDEDEF;--pv-text-2:#A1A1A6;--pv-text-3:#6E6E73;--pv-infra:#0A84FF;--pv-climate:#FF9F0A;
+        --pv-neutral:#636366;--pv-ok:#30D158;--pv-warn:#FFB020;--pv-bad:#FF453A}
+      :host(:not([look=theme])) ha-card{background:var(--pv-surface);border:1px solid var(--pv-border);border-radius:14px;box-shadow:0 1px 2px rgba(0,0,0,.04);
+        font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","Inter",system-ui,sans-serif}
+      :host([look=theme]){--pv-surface:var(--card-background-color, var(--ha-card-background, #fff));
+        --pv-surface-2:color-mix(in srgb, var(--primary-text-color, #000) 3%, var(--pv-surface));
+        --pv-fill:color-mix(in srgb, var(--primary-text-color, #000) 9%, transparent);--pv-border:var(--divider-color, rgba(127,127,127,.2));
+        --pv-text:var(--primary-text-color);--pv-text-2:var(--secondary-text-color);
+        --pv-text-3:color-mix(in srgb, var(--secondary-text-color) 75%, transparent);--pv-infra:var(--primary-color);
+        --pv-climate:var(--state-climate-heat-color, #FF8100);--pv-neutral:var(--disabled-color, #9E9E9E);
+        --pv-ok:var(--success-color, #43A047);--pv-warn:var(--warning-color, #FFA600);--pv-bad:var(--error-color, #DB4437)}
       ha-card{position:relative;container:card/inline-size;padding:16px;font-family:inherit;font-size:13px;line-height:1.4;color:${text};-webkit-font-smoothing:antialiased}
       button{font:inherit;color:inherit}
       .body{display:flex;flex-direction:column;gap:12px;margin-top:12px}
@@ -437,7 +473,7 @@ class PiVitalsCard extends HTMLElement {
       .blg i{width:9px;height:9px;border-radius:2.5px;box-sizing:border-box}
       .blg i.on{border:1.3px solid ${accent};background:color-mix(in srgb, ${accent} 14%, transparent)}
       .blg i.off{border:1.1px dashed ${text3};opacity:.6}
-      .board .part.on .pt{stroke:${accent};stroke-width:1.1;fill:color-mix(in srgb, ${accent} 7%, var(--sh-surface, #fff))}
+      .board .part.on .pt{stroke:${accent};stroke-width:1.1;fill:color-mix(in srgb, ${accent} 7%, var(--pv-surface))}
       .board .part.on .lbl{fill:${accent}}
       .board .part.off>:not(.hb){opacity:.4}
       .board .part.off .pt{stroke-dasharray:2 1.6}
@@ -505,8 +541,8 @@ class PiVitalsCard extends HTMLElement {
       .ph b{font-size:13px;font-weight:600;white-space:nowrap}
       .ph .m{margin-left:auto;font-size:12px;color:${text3};white-space:nowrap;font-variant-numeric:tabular-nums}
       .pb{padding:0 14px}
-      .pulse{flex:none;width:7px;height:7px;border-radius:50%;background:var(--sh-ok, #1F9D45);animation:p 2s infinite}
-      @keyframes p{0%{box-shadow:0 0 0 0 color-mix(in srgb, var(--sh-ok, #1F9D45) 55%, transparent)}70%,100%{box-shadow:0 0 0 6px transparent}}
+      .pulse{flex:none;width:7px;height:7px;border-radius:50%;background:var(--pv-ok);animation:p 2s infinite}
+      @keyframes p{0%{box-shadow:0 0 0 0 color-mix(in srgb, var(--pv-ok) 55%, transparent)}70%,100%{box-shadow:0 0 0 6px transparent}}
       @media (prefers-reduced-motion:reduce){.board .fan,.board .sd.w,.pulse{animation:none}}
       .sparks{display:grid;grid-template-columns:repeat(6,minmax(0,1fr))}
       .spark{padding:12px 14px}
@@ -556,12 +592,12 @@ class PiVitalsCard extends HTMLElement {
       td .sub{margin-left:4px}
       .apps{margin:0 -14px;width:calc(100% + 28px)}.apps th:first-child,.apps td:first-child{padding-left:14px}.apps th:last-child,.apps td:last-child{padding-right:14px}
       .pill{display:inline-flex;align-items:center;gap:6px;height:22px;box-sizing:border-box;padding:0 8px;border:1px solid ${line};border-radius:6px;font-size:12px;font-weight:500;color:${text};white-space:nowrap;vertical-align:middle}
-      .pill::before{content:"";flex:none;width:6px;height:6px;border-radius:50%;background:var(--sh-neutral, #A1A1A6)}
-      .on::before{background:var(--sh-ok, #1F9D45)}.off::before{background:var(--sh-neutral, #A1A1A6)}.upd::before{background:var(--sh-warn, #D97706)}.bad::before{background:var(--sh-bad, #E5302A)}
+      .pill::before{content:"";flex:none;width:6px;height:6px;border-radius:50%;background:var(--pv-neutral)}
+      .on::before{background:var(--pv-ok)}.off::before{background:var(--pv-neutral)}.upd::before{background:var(--pv-warn)}.bad::before{background:var(--pv-bad)}
       .pv{display:inline-block;min-width:44px;box-sizing:border-box;text-align:center;font-size:12px;font-weight:500;padding:2px 6px;border-radius:6px;background:${fill}}
       .psi td{height:34px}
-      .setup{display:flex;gap:10px;align-items:flex-start;border:1px solid color-mix(in srgb, var(--sh-warn, #D97706) 35%, transparent);background:color-mix(in srgb, var(--sh-warn, #D97706) 6%, transparent);border-radius:10px;padding:12px 14px;line-height:1.45}
-      .setup ha-icon{--mdc-icon-size:18px;color:var(--sh-warn, #D97706);flex:none;margin-top:0}
+      .setup{display:flex;gap:10px;align-items:flex-start;border:1px solid color-mix(in srgb, var(--pv-warn) 35%, transparent);background:color-mix(in srgb, var(--pv-warn) 6%, transparent);border-radius:10px;padding:12px 14px;line-height:1.45}
+      .setup ha-icon{--mdc-icon-size:18px;color:var(--pv-warn);flex:none;margin-top:0}
       .setup b{font-weight:600}
       .setup a{color:${accent};cursor:pointer;text-decoration:none;font-weight:500;white-space:nowrap}
       details.more summary{list-style:none;cursor:pointer;display:flex;align-items:center;gap:8px;min-height:40px;box-sizing:border-box;padding:0 12px;border:1px solid ${line};border-radius:10px;color:${text3};user-select:none;transition:background .12s}
@@ -654,6 +690,8 @@ class PiVitalsCard extends HTMLElement {
     const seg = (key, opts) => `<div class="seg" role="group">${opts.map(([v, l]) => `<button data-set="${key}" data-v="${v}" aria-pressed="${s[key] === v}">${l}</button>`).join("")}</div>`;
     const sw = (key, label) => `<button class="sw" role="switch" data-set="${key}" data-v="${!s[key]}" aria-checked="${s[key]}" aria-label="${label}"></button>`;
     m.innerHTML = `<div class="mh">Settings<span>System</span></div>
+      <div class="mr"><div><b>Style</b><small>Studio is the card's own look</small></div>${seg("look", [["studio", "Studio"], ["theme", "My theme"]])}</div>
+      <div class="sep"></div>
       <div class="mr"><div><b>Temperature</b><small>Readings, tips and charts</small></div>${seg("temperature_unit", [["F", "°F"], ["C", "°C"]])}</div>
       <div class="sep"></div>
       <div class="mr"><div><b>Explanations</b><small>The ⓘ next to each reading</small></div>${sw("tips", "Explanations")}</div>
@@ -728,7 +766,7 @@ class PiVitalsCard extends HTMLElement {
       ${s.fan == null ? "" : part("fan", "Cooling fan", fanOn ? "on" : "", [43, 35, 46, 56], `<circle class="ln" cx="${cx}" cy="${cy}" r="22"/>
         <g class="fan${fanOn ? "" : " off"}" style="--d:${s.fanDur}s" fill="none" stroke-width=".9" stroke-linecap="round"><g style="stroke:${fanOn ? C.accent : C.text3};opacity:${fanOn ? .55 : .4}">${blades}</g></g>
         <text class="lbl v" x="${cx}" y="${cy + 29}" text-anchor="middle">${s.fanTxt}</text>`)}
-      ${part("soc", "Processor", "", [52, 44, 28, 28], `<rect x="${cx - 12}" y="${cy - 12}" width="24" height="24" rx="3" stroke-width="1.3" style="fill:color-mix(in srgb, ${s.soc} 16%, var(--sh-surface, #fff));stroke:${s.soc}"/>
+      ${part("soc", "Processor", "", [52, 44, 28, 28], `<rect x="${cx - 12}" y="${cy - 12}" width="24" height="24" rx="3" stroke-width="1.3" style="fill:color-mix(in srgb, ${s.soc} 16%, var(--pv-surface));stroke:${s.soc}"/>
         <text class="lbl" x="${cx}" y="${cy - 5}" text-anchor="middle" style="fill:${s.soc};font-size:4.4px">${s.chip}</text>
         ${s.temp ? `<text class="lbl" x="${cx}" y="${cy + 2.6}" text-anchor="middle" style="fill:${s.soc};font-size:7.6px;letter-spacing:0">${s.temp}</text>` : ""}
         ${s.cpu != null ? `<text class="lbl" x="${cx}" y="${cy + 8.6}" text-anchor="middle" style="fill:${s.soc};font-size:4.8px;letter-spacing:.02em">CPU ${s.cpu}%</text>` : ""}`)}
@@ -739,13 +777,19 @@ class PiVitalsCard extends HTMLElement {
       ${part("rp1", "RP1 I/O controller", "", [122, 49, 18, 27], `<rect class="pt" x="124" y="51" width="14" height="14" rx="1.5"/><text class="lbl" x="131" y="73" text-anchor="middle">RP1</text>`)}
     </svg>`;
   }
+  // Board name from Home Assistant's own hardware info ("Raspberry Pi 5"), so the model is known without the pi_vitals sensor.
+  async loadHw() {
+    try { const r = await this._hass.callWS({ type: "hardware/info" }); this.hwModel = (r.hardware || []).map(h => h.name).find(n => n) || null; }
+    catch (e) { this.hwModel = null; }
+    if (this.hwModel) { this.boardSig = ""; this.render(); }
+  }
   // Plugged-in USB devices from the Supervisor's hardware list (admins only). Root hubs and hubs are skipped.
   // Unavailable (not an admin, no Supervisor) leaves the USB ports neutral rather than guessing.
   async loadUsb() {
     try {
       const r = await this._hass.callWS({ type: "supervisor/api", endpoint: "/hardware/info", method: "get" });
       this.usb = (r.devices || []).filter(d => d.subsystem === "usb" && d.attributes?.DEVTYPE === "usb_device" && !/^usb\d+$/.test(d.name) && !/^:09/.test(d.attributes?.ID_USB_INTERFACES || ""))
-        .map(d => (d.attributes.ID_MODEL_FROM_DATABASE || d.attributes.ID_USB_MODEL || d.attributes.ID_MODEL || "USB device").replace(/_/g, " "));
+        .map(d => pvEsc((d.attributes.ID_MODEL_FROM_DATABASE || d.attributes.ID_USB_MODEL || d.attributes.ID_MODEL || "USB device").replace(/_/g, " ")));
     } catch (e) { this.usb = null; this.usbT = Infinity; }
     this.render();
   }
@@ -771,8 +815,9 @@ class PiVitalsCard extends HTMLElement {
     const boot = v("uptime") || v("last_boot"), up = boot ? this.dur(Date.now() - new Date(boot)) : null;
     const ver = id => H[id]?.attributes?.installed_version || "—";
     // model from pi_vitals (/proc/device-tree/model), else "Raspberry Pi" when the power checker exists; the board drawing only shows on a Pi
-    const model = cfg.title || (VA.model ? VA.model.replace(/ Model .*| Rev .*/, "") : R.rpiPower ? "Raspberry Pi" : "Home Assistant host");
-    const isPi = /raspberry/i.test(VA.model || "") || !!R.rpiPower || /raspberry/i.test(cfg.title || "");
+    const hwm = VA.model || this.hwModel || "";
+    const model = pvEsc(cfg.title || (hwm ? hwm.replace(/ Model .*| Rev .*/, "") : R.rpiPower ? "Raspberry Pi" : "Home Assistant host"));
+    const isPi = /raspberry/i.test(hwm) || !!R.rpiPower || /raspberry/i.test(cfg.title || "");
     const tempColor = tC == null ? C.neutral : tC >= cfg.temp_bad_c ? C.bad : tC >= cfg.temp_warn_c ? C.warn : C.climate;
     const busy = (x, warn, bad) => x == null ? C.neutral : x >= bad ? C.bad : x >= warn ? C.warn : null;
     const gb = mib => (mib / 1024).toFixed(1);
@@ -815,9 +860,9 @@ class PiVitalsCard extends HTMLElement {
     const vColor = noData ? C.neutral : [C.ok, C.warn, C.bad][worst];
 
     // board, redrawn only when its state changes
-    this.gen = /Pi 5/.test(model) ? 5 : /Pi 4/.test(model) ? 4 : /Pi 3/.test(model) ? 3 : 0;
+    this.gen = /Pi 5/.test(hwm || model) ? 5 : /Pi 4/.test(hwm || model) ? 4 : /Pi 3/.test(hwm || model) ? 3 : 0;
     const onSd = VA.disk_device ? /^mmcblk/.test(VA.disk_device) : null, dbmTxt = dbm == null ? null : String(dbm).replace("-", "−");
-    const bs = { soc: tempColor, chip: /Pi 5/.test(model) ? "2712" : /Pi 4/.test(model) ? "2711" : "SoC", fan: fan == null ? null : fan > 0, fanDur: fan ? Math.max(0.25, Math.round(2400 / fan * 4) / 4) : 1,
+    const bs = { soc: tempColor, chip: /Pi 5/.test(hwm || model) ? "2712" : /Pi 4/.test(hwm || model) ? "2711" : "SoC", fan: fan == null ? null : fan > 0, fanDur: fan ? Math.max(0.25, Math.round(2400 / fan * 4) / 4) : 1,
       fanTxt: fan ? Math.round(fan).toLocaleString() + " RPM" : "IDLE", led: uvNow ? C.bad : C.ok, wifi: wired ? null : wifiBars, dbm: wired ? null : dbmTxt,
       sd: (VA.disk_write_kbs ?? 0) > 50 && onSd, sdOn: onSd, sdPct: onSd === false || disk == null ? null : Math.round(disk), watts: watts != null ? watts.toFixed(1) + " W" : null,
       temp: tC == null ? null : Math.round(this.tC2D(tC)) + "°", cpu: cpu == null ? null : Math.round(cpu), mem: mem == null ? null : Math.round(mem), eth: wired,
@@ -849,7 +894,7 @@ class PiVitalsCard extends HTMLElement {
     if (thr) fx.push([slowNow ? C.bad : slowBoot ? C.warn : C.ok, "Throttling", slowNow ? "Active now" : slowBoot ? "Earlier since boot" : "None since boot", VA.arm_mhz ? `CPU ${VA.arm_mhz.toLocaleString()} MHz now` : "", "throttle"]);
     if (disk != null) fx.push([busy(disk, 80, 90) || C.ok, "Storage", `${Math.round(disk)}% used`, [devKind(VA.disk_device), VA.db_mb ? `DB ${VA.db_mb >= 1000 ? (VA.db_mb / 1000).toFixed(1) + " GB" : Math.round(VA.db_mb) + " MB"}` : ""].filter(Boolean).join(" · "), "storage"]);
     if (H[bLast]) fx.push([backupAgeD == null ? C.neutral : backupAgeD > cfg.backup_stale_days ? C.warn : C.ok, "Backups", ago(bLast) || "None yet", ago(bNext) ? `Next ${ago(bNext)}` : "", "backup"]);
-    fx.push([pendingU.length ? C.warn : C.ok, "Updates", pendingU.length ? `${pendingU.length} available` : "All current", pendingU.length ? pendingU.map(u => (u.attributes.friendly_name || "").replace(/ update$/i, "")).join(", ") : `${updates.length} tracked`, "updates"]);
+    fx.push([pendingU.length ? C.warn : C.ok, "Updates", pendingU.length ? `${pendingU.length} available` : "All current", pendingU.length ? pendingU.map(u => pvEsc((u.attributes.friendly_name || "").replace(/ update$/i, ""))).join(", ") : `${updates.length} tracked`, "updates"]);
     if (wired) fx.push([C.ok, "Network", "Ethernet", ifc, "net"]);
     else if (dbm != null) fx.push([dbm > -67 ? C.ok : dbm > -75 ? C.warn : C.bad, "Wi-Fi", dbm > -60 ? "Excellent" : dbm > -70 ? "Good" : dbm > -75 ? "Fair" : "Weak", `${String(dbm).replace("-", "−")} dBm now`, "wifi"]);
     this.shadowRoot.querySelector(".hl").innerHTML = `<span class="tile"><ha-icon icon="${isPi ? "mdi:raspberry-pi" : "mdi:server"}"></ha-icon></span>
@@ -901,7 +946,7 @@ class PiVitalsCard extends HTMLElement {
     const flagPills = (list, cls) => list.length ? `<span class="flags">${list.map(f => `<span class="pill ${cls}">${flagName[f] || f}</span>`).join("")}</span>` : `<span class="pill on">None</span>`;
     const perf = panel("Power & performance", `<div class="kvs">
       ${watts != null ? kvr("Board power", `${watts.toFixed(2)} W <span class="x">now</span>`, "power_g") : ""}
-      ${VA.arm_mhz ? kvr("CPU clock", `${VA.arm_mhz.toLocaleString()} MHz <span class="x">now${/Pi 5/.test(model) ? ", of 2,400" : ""}</span>`, "clock") : ""}
+      ${VA.arm_mhz ? kvr("CPU clock", `${VA.arm_mhz.toLocaleString()} MHz <span class="x">now${/Pi 5/.test(hwm || model) ? ", of 2,400" : ""}</span>`, "clock") : ""}
       ${thr ? kvr("Throttling now", flagPills(tNow, "bad"), "throttle") + kvr("Since boot", flagPills(tBoot, "upd"), "throttle") : ""}
       ${!thr && ps ? kvr("Power supply", ps === "on" ? `<span class="pill bad">Under-voltage</span>` : `<span class="pill on">OK</span>`, "uv") : ""}
       ${fan != null ? kvr("Fan", fan ? `${Math.round(fan).toLocaleString()} rpm <span class="x">now, ${Math.round(fan / cfg.fan_max_rpm * 100)}% of full</span>` : `Idle <span class="x">now</span>`, "fan") : ""}
@@ -909,7 +954,7 @@ class PiVitalsCard extends HTMLElement {
     </div>`);
     const care = panel("Backups & updates", `<div class="kvs">
       ${H[bLast] ? kvr("Last backup", ago(bLast) || "—", "backup") + kvr("Next backup", ago(bNext) || "—") : ""}
-      ${pendingU.length ? pendingU.map(u => kvr((u.attributes.friendly_name || u.entity_id).replace(/ update$/i, ""), `<span class="x">${u.attributes.installed_version ?? ""} →</span> <span class="pill upd">${u.attributes.latest_version}</span>`)).join("")
+      ${pendingU.length ? pendingU.map(u => kvr(pvEsc((u.attributes.friendly_name || u.entity_id).replace(/ update$/i, "")), `<span class="x">${pvEsc(u.attributes.installed_version)} →</span> <span class="pill upd">${pvEsc(u.attributes.latest_version)}</span>`)).join("")
         : kvr("Updates", `<span class="pill on">All ${updates.length} current</span>`, "updates")}
     </div>`, pendingU.length ? `${pendingU.length} pending` : "");
 
@@ -935,7 +980,7 @@ class PiVitalsCard extends HTMLElement {
         ${R.apps.map(a => { const run = stateOf(a.running) === "on", upd = stateOf(a.update) === "on";
           return `<tr${a.cpu_percent ? ` data-detail="${a.cpu_percent}|${a.name} CPU|infra|1|24H" tabindex="0"` : ""}><td>${a.name}</td><td><span class="pill ${run ? "on" : "off"}" title="${run ? "Running" : "Stopped"}"><span class="pt">${run ? "Running" : "Stopped"}</span></span></td>
             <td>${run ? pct1(hn(a.cpu_percent)) : "—"}</td><td>${run ? pct1(hn(a.memory_percent)) : "—"}</td>
-            <td>${stateOf(a.version) || "—"}${upd ? ` <span class="pill upd">→ ${stateOf(a.version_latest) || H[a.update]?.attributes?.latest_version}</span>` : ""}</td></tr>`; }).join("")}</table>`,
+            <td>${pvEsc(stateOf(a.version)) || "—"}${upd ? ` <span class="pill upd">→ ${pvEsc(stateOf(a.version_latest) || H[a.update]?.attributes?.latest_version)}</span>` : ""}</td></tr>`; }).join("")}</table>`,
       [R.apps.length ? `${running} of ${R.apps.length} running` : "", (() => { const ts = [...sys.map(([, d]) => d.cpu_percent), ...R.apps.map(a => a.cpu_percent)].map(id => H[id]?.last_updated).filter(Boolean).map(x => Date.parse(x));
         return ts.length ? "usage as of " + this.dur(Date.now() - Math.max(...ts)) + " ago" : ""; })()].filter(Boolean).join(" · "), "apps");
 
@@ -984,7 +1029,7 @@ class PiVitalsCard extends HTMLElement {
         <div class="fx"><div class="k">Home Assistant${this.tip("ha_stats")}</div><div class="val">${Object.keys(H).length.toLocaleString()} entities</div><div class="sub">${count("automation")} automations · ${count("script")} scripts</div></div>
         <div class="fx"><div class="k">Platform${this.tip("ha")}</div><div class="val">${R.sys.os ? `OS ${stateOf(R.sys.os.version) ?? "—"}` : `Core ${ver(R.sys.core?.update)}`}</div><div class="sub">${R.sys.os ? `Core ${ver(R.sys.core?.update)}` : "&nbsp;"}</div></div>
       </div>
-      ${cfg.footer ? `<div class="foot">${cfg.footer}</div>` : ""}${vitalsHint}
+      ${cfg.footer ? `<div class="foot">${pvEsc(cfg.footer)}</div>` : ""}${vitalsHint}
     </details>`;
 
     // part panel: the board part someone picked, with its live readings (tap one for its history) and its specs
@@ -994,9 +1039,9 @@ class PiVitalsCard extends HTMLElement {
       const q = t => `<span class="qu">${t}</span>`, tv = tC == null ? "—" : Math.round(this.tC2D(tC)) + " " + tUnit;
       const flagsTxt = l => l.length ? l.map(f => flagName[f] || f).join(", ") : "None";
       const net = sfx => { const x = n(sfx); return x == null ? "—" : `${fmt(x, "MB/s")} ${unit(x, "MB/s")}`; };
-      const pi5 = /Pi 5/.test(model), ramGb = memTot ? Math.round(memTot / 1024) : null;
+      const pi5 = /Pi 5/.test(hwm || model), ramGb = memTot ? Math.round(memTot / 1024) : null;
       const P = {
-        board: { meta: VA.model || model, live: [["Status", verdict, ""], ["Up", up || "—", "since boot"], ["Board power", watts != null ? watts.toFixed(2) + " W" : "—", "now", det(R.vitals, "Pi board power", 2, "6H")], ["CPU", cpu == null ? "—" : Math.round(cpu) + "%", "now", det("processor_use", "CPU", 0, "6H")], ["Temperature", tv, "now", det("processor_temperature", "CPU temperature", 1, "6H", "|t")]],
+        board: { meta: pvEsc(hwm) || model, live: [["Status", verdict, ""], ["Up", up || "—", "since boot"], ["Board power", watts != null ? watts.toFixed(2) + " W" : "—", "now", det(R.vitals, "Pi board power", 2, "6H")], ["CPU", cpu == null ? "—" : Math.round(cpu) + "%", "now", det("processor_use", "CPU", 0, "6H")], ["Temperature", tv, "now", det("processor_temperature", "CPU temperature", 1, "6H", "|t")]],
           specs: pi5 ? [["Processor", "Broadcom BCM2712, 4× Cortex-A76 at 2.4 GHz"], ["Graphics", "VideoCore VII"], ["Memory", (ramGb ? ramGb + " GB " : "") + "LPDDR4X-4267"], ["Wireless", "Wi-Fi 5 (dual band), Bluetooth 5.0"], ["Ethernet", "Gigabit, PoE+ with a HAT"], ["USB", "2× USB 3.0, 2× USB 2.0"], ["Video", "2× micro-HDMI, 4K at 60 Hz"], ["Storage", "microSD; PCIe 2.0 ×1 for an NVMe SSD"], ["Power", "USB-C, 5 V at up to 5 A"], ["Size", "85 × 56 mm"]] : [] },
         soc: { meta: pi5 ? "Broadcom BCM2712" : "Processor", live: [["CPU use", cpu == null ? "—" : Math.round(cpu) + "%", "now", det("processor_use", "CPU", 0, "6H")], ["Temperature", tv, "now", det("processor_temperature", "CPU temperature", 1, "6H", "|t")],
             ["Clock", VA.arm_mhz ? VA.arm_mhz.toLocaleString() + " MHz" : "—", "now"], ["Load", l1 != null ? l1.toFixed(2) : "—", "1-min avg", det("load_1_min", "Load · 1 min", 2, "6H")], ["Throttling", flagsTxt(tNow), "now"], ["Throttled", flagsTxt(tBoot), "since boot"]],
@@ -1049,10 +1094,15 @@ class PiVitalsCard extends HTMLElement {
   }
 }
 const PV_WINDOW = 10 * 60e3;
+// escape text that comes from entities, devices or config before it goes into innerHTML
+const pvEsc = x => String(x ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 // board parts, in the words the part panel uses
 const PV_PARTS = { board: "whole board", soc: "processor", ram: "memory", fan: "cooling fan", sd: "boot disk", power: "power input", wifi: "Wi-Fi and Bluetooth",
   eth: "Ethernet port", usb: "USB ports", hdmi: "micro-HDMI ports", rp1: "RP1 I/O controller", gpio: "GPIO header" };
 if (!customElements.get("pi-vitals-card")) customElements.define("pi-vitals-card", PiVitalsCard);
 window.customCards = window.customCards || [];
-if (!window.customCards.some(c => c.type === "pi-vitals-card")) window.customCards.push({ type: "pi-vitals-card", name: "Pi Vitals", description: "Raspberry Pi health at a glance: board status, gauges, live sparklines, storage wear, throttling, backups and updates.", preview: true, documentationURL: "https://github.com/samansabeti/pi-vitals-card" });
+if (!window.customCards.some(c => c.type === "pi-vitals-card")) window.customCards.push({ type: "pi-vitals-card", name: "Pi Vitals", description: "Raspberry Pi health at a glance: board status, gauges, live sparklines, storage wear, throttling, backups and updates.", preview: true, documentationURL: "https://github.com/samansabeti/pi-vitals-card",
+  // offered in the card picker when someone starts from a Pi or System Monitor sensor
+  getEntitySuggestion: (hass, entityId) => ["systemmonitor", "rpi_power", "pi_vitals"].includes(hass?.entities?.[entityId]?.platform) || entityId === "sensor.pi_board_power"
+    ? { config: { type: "custom:pi-vitals-card" } } : null });
 console.info(`%c PI-VITALS-CARD %c v${PV_VERSION} `, "color:#fff;background:#111;font-weight:600", "color:#111;background:#eee");

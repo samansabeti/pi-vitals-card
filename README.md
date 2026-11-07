@@ -4,7 +4,7 @@ A Raspberry Pi health dashboard for Home Assistant, in a single card. It's built
 
 ![Pi Vitals card](images/pi-vitals-light.png)
 
-- **A live, clickable board drawing.** Parts light up from real data (processor temperature on the chip, RAM fills with use, fan spins at real speed, LED red on under-voltage, Wi-Fi arcs, SD blinks on writes). Tap any part for its live readings (each opens its history) and its Pi 5 specs.
+- **A live board drawing.** Parts in use are drawn in color with their live reading (processor temperature and load, RAM, SD card, board watts, Wi-Fi signal, fan speed); empty or unused ports are faded. USB counts as in use when something is plugged in. Hover a part for a one-line summary, or tap it for its live readings (each opens its history) and specs for your board.
 - **A verdict with its reasons.** "All systems normal" (or the worst problem), plus status facts beside the board: power, throttling, storage, backups, updates, Wi-Fi.
 - **Ring gauges** for CPU, memory, disk and temperature, each compared with its own 7-day normal ("Usually 4%", or "Above usual" when it's well outside its normal swing). Disk shows when it would be full at its typical daily growth. Tap one for its history.
 - **Live sparklines** covering the last 10 minutes. Hover (or drag on a phone) and the big number shows that moment, with its time; click one for its longer history (so do Apps rows).
@@ -14,17 +14,22 @@ A Raspberry Pi health dashboard for Home Assistant, in a single card. It's built
 - **Backups, updates and apps.** Only pending updates are listed, plus each app's CPU and RAM. The Backups and Updates facts open those Settings pages.
 - **Recent events** from the last 7 days: Pi reboots, Home Assistant restarts, throttling and power dips, failed backups (successful ones collapse into one row), apps stopping or restarting, and installed updates.
 - **More details** (collapsed): RAM and swap, load average, stall pressure, network counters, platform versions.
-- **Settings** (the sliders button in the header): °F or °C, show or hide the ⓘ explanations, show or hide the Apps table. Saved to each person's Home Assistant profile, so they follow you to every device.
+- **Two styles.** *Studio*, the card's own calm look (light and dark follow Home Assistant), or *My theme*, which takes every color from your dashboard theme.
+- **Settings** (the sliders button in the header): style, °F or °C, show or hide the ⓘ explanations, show or hide the Apps table. Saved to each person's Home Assistant profile, so they follow you to every device.
 
 Every number has an ⓘ tooltip in plain English. Sensors are found by what they are, not by entity ID, so it works on installs in any language. If System Monitor is missing or some of its sensors are off, the card says which ones and links to the page where you turn them on. The layout adapts to the card's width, from phone to widescreen. Light and dark mode follow your theme. No dependencies, no build step, one file.
 
 ## Install
 
-**HACS (custom repository):** HACS → ⋮ → Custom repositories → add `https://github.com/samansabeti/pi-vitals-card` as type *Dashboard* → install **Pi Vitals** → reload the browser.
+Needs Home Assistant 2025.1 or newer (tested on 2026.11).
 
-**Manual:** copy `pi-vitals-card.js` to `/config/www/`. Then add it under Settings → Dashboards → ⋮ → Resources as `/local/pi-vitals-card.js` (JavaScript module).
+**Marketplace (Home Assistant 2026.11+):** Settings → Marketplace → **Add from link** → `samansabeti/pi-vitals-card` → install **Pi Vitals**. The Marketplace adds the dashboard resource for you.
 
-Then add the card:
+**HACS (Home Assistant before 2026.11):** HACS → ⋮ → Custom repositories → add `https://github.com/samansabeti/pi-vitals-card` as type *Dashboard* → install **Pi Vitals** → reload the browser.
+
+**Manual:** copy `pi-vitals-card.js` to `/config/www/`, then add it under Settings → Dashboards → ⋮ → Resources as `/local/pi-vitals-card.js?v=1` (JavaScript module). Bump `v` after updating the file.
+
+Then add the card. It also shows up in the card picker when you start from a System Monitor or Raspberry Pi sensor:
 
 ```yaml
 type: custom:pi-vitals-card
@@ -68,7 +73,8 @@ All optional. Set them in the visual editor (Edit dashboard → the card), group
 
 | Option | Default | |
 |---|---|---|
-| `title` | auto (board model from the vitals sensor, else "Raspberry Pi"; "Home Assistant host" off a Pi, where the board drawing is hidden) | Model label |
+| `style` | `studio` | `studio` (the card's own look) or `theme` (your dashboard theme's colors). Each viewer can still switch in Settings |
+| `title` | auto (board model from Home Assistant's hardware info, else "Raspberry Pi"; "Home Assistant host" off a Pi, where the board drawing is hidden) | Model label |
 | `prefix` | — | Only if sensors are found wrongly: forces the old lookup by English entity IDs with this prefix (e.g. `sensor.system_monitor_`) |
 | `interface` | auto (`wlan0`, `eth0`, `end0`) | Network interface to show |
 | `vitals_entity` | `sensor.pi_board_power`, else auto-detected | The pi_vitals sensor |
@@ -84,17 +90,17 @@ All optional. Set them in the visual editor (Edit dashboard → the card), group
 
 ### Colors
 
-The card follows your theme. To give the data a different hue, set `--pv-accent`. You can set it in your theme or with card-mod:
+Pick *Studio* or *My theme* in the card's Settings (or `style:` in YAML). To give the data a different hue, set `--pv-accent`. You can set it in your theme or with card-mod:
 
 ```yaml
 pv-accent: "#14B8A6"
 ```
 
-Status colors read `--sh-ok`, `--sh-warn` and `--sh-bad` if your theme defines them, with green, amber and red fallbacks.
+In *My theme*, status colors come from your theme's `--success-color`, `--warning-color` and `--error-color`.
 
 ## Tested
 
-On a Pi 5 (8 GB, HA OS, Wi-Fi, SD card) running Home Assistant 2026.10. The card was also rendered against simulated installs: German entity IDs, a Pi 4 on Ethernet with °C sensors and no vitals sensor, a non-Pi host with only two System Monitor sensors, and no System Monitor at all. Please open an issue with a screenshot if something looks off on your setup.
+On a Pi 5 (8 GB, HA OS, Wi-Fi, SD card) running Home Assistant 2026.11. The card was also rendered against simulated installs: German entity IDs, a Pi 4 on Ethernet with °C sensors and no vitals sensor, a non-Pi host with only two System Monitor sensors, and no System Monitor at all. Please open an issue with a screenshot if something looks off on your setup.
 
 ## License
 
