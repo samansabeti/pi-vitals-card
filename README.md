@@ -1,6 +1,8 @@
 # Pi Vitals card
 
-A Raspberry Pi health dashboard for Home Assistant, in a single card. It's built to answer what Pi owners actually ask: *is it throttling, is the power supply OK, is my SD card OK, are backups running?*
+A Raspberry Pi health dashboard for [Home Assistant](https://www.home-assistant.io), the open-source smart-home platform that many people run on a Raspberry Pi. It's a single card you add to a dashboard, built to answer what Pi owners actually ask: *is it throttling, is the power supply OK, is my SD card OK, are backups running?*
+
+**Why I made it.** There are already ways to watch a Pi in Home Assistant. I wanted one for my own dashboard that looks clean and has charts you can interact with: hover a sparkline to read any moment, tap a gauge to open its history. I'm sharing it in case it's useful to someone else.
 
 ![Pi Vitals card](images/pi-vitals-light.png)
 
