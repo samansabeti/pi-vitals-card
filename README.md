@@ -4,6 +4,8 @@ A Raspberry Pi health dashboard for Home Assistant, in a single card. It's built
 
 ![Pi Vitals card](images/pi-vitals-light.png)
 
+*Screenshot uses simulated data. There is a [dark version](images/pi-vitals-dark.png) too.*
+
 - **A live board drawing.** Parts in use are drawn in color with their live reading (processor temperature and load, RAM, SD card, board watts, Wi-Fi signal, fan speed); empty or unused ports are faded. USB counts as in use when something is plugged in. Hover a part for a one-line summary, or tap it for its live readings (each opens its history) and specs for your board.
 - **A verdict with its reasons.** "All systems normal" (or the worst problem), plus status facts beside the board: power, throttling, storage, backups, updates, Wi-Fi.
 - **Ring gauges** for CPU, memory, disk and temperature, each compared with its own 7-day normal ("Usually 4%", or "Above usual" when it's well outside its normal swing). Disk shows when it would be full at its typical daily growth. Tap one for its history.
